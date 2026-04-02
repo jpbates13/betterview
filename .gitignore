@@ -1,0 +1,55 @@
+initial_transaction_data/
+standalone/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and local settings
+.env
+.env.*
+!.env.example
+*.local
+
+# Local databases and exports (financial data)
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Keep optional safe sample data folder trackable if you add one
+!sample_data/
+!sample_data/**
+
+# Runtime folders used by import scripts
+uploads/
+archive/
+
+# Frontend build/deps
+node_modules/
+dist/
+dist-ssr/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
