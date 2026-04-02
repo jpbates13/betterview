@@ -2,13 +2,6 @@ import Papa from 'papaparse';
 import { applyRulesToImportedTransactions, bootstrapSchema, getRules } from './dbQueries.js';
 import { saveDbToBrowser } from './dbStorage.js';
 
-const EXCLUDED_ACCOUNTS = new Set([
-  'ROTH IRA',
-  'Old Taxable Brokerage',
-  'LIBERTY MUTUAL 401(K) PLAN',
-  'LIBERTY MUTUAL 401(K)',
-]);
-
 const toSql = (value) => {
   if (value === null || value === undefined) return 'NULL';
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL';
@@ -152,7 +145,6 @@ const mapFidelityTransactionRows = (rows, fileName) => {
     const category = String(row.Category ?? row.Type ?? 'Uncategorized').trim() || 'Uncategorized';
 
     if (!date || !description || amount === null || !account) return;
-    if (EXCLUDED_ACCOUNTS.has(account)) return;
 
     mapped.push({
       date,
