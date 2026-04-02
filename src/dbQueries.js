@@ -1,23 +1,16 @@
 import { saveDbToBrowser } from './dbStorage.js';
 
-const EXCLUDED_PATTERN_SQL = `(
-  COALESCE(LOWER(category), '') LIKE '%transfer%' OR
-  COALESCE(LOWER(category), '') LIKE '%saving%' OR
-  COALESCE(LOWER(description), '') LIKE '%bill payment%' OR
-  COALESCE(LOWER(description), '') LIKE '%payment thank you%' OR
-  COALESCE(LOWER(description), '') LIKE '%electronic payment%'
-)`;
+const SETTINGS_KEYS = {
+  excludedCategoryKeywords: 'excluded_category_keywords',
+  excludedDescriptionKeywords: 'excluded_description_keywords',
+  reimbursementExcludedCategories: 'reimbursement_excluded_categories',
+};
 
-const INCLUDED_CONDITION_SQL = `(
-  manual_override = 0 OR (
-    manual_override IS NULL AND
-    COALESCE(LOWER(category), '') NOT LIKE '%transfer%' AND
-    COALESCE(LOWER(category), '') NOT LIKE '%saving%' AND
-    COALESCE(LOWER(description), '') NOT LIKE '%bill payment%' AND
-    COALESCE(LOWER(description), '') NOT LIKE '%payment thank you%' AND
-    COALESCE(LOWER(description), '') NOT LIKE '%electronic payment%'
-  )
-)`;
+const DEFAULT_ANALYTICS_SETTINGS = {
+  [SETTINGS_KEYS.excludedCategoryKeywords]: ['transfer', 'saving'],
+  [SETTINGS_KEYS.excludedDescriptionKeywords]: ['bill payment', 'payment thank you', 'electronic payment'],
+  [SETTINGS_KEYS.reimbursementExcludedCategories]: ['income', 'transfers', 'transfer', 'credit card payment'],
+};
 
 const REQUIRED_COLUMNS = {
   manual_override: 'INTEGER',
@@ -75,6 +68,149 @@ const randomKey = (prefix) => {
 const normalizeText = (value) => String(value ?? '').trim();
 
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
+
+const normalizeStringList = (values) => {
+  if (!Array.isArray(values)) return [];
+
+  const seen = new Set();
+  const normalized = [];
+
+  for (const item of values) {
+    const value = normalizeLower(item);
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  return normalized;
+};
+
+const parseArraySettingValue = (rawValue, fallback) => {
+  const parsedFallback = normalizeStringList(fallback);
+
+  try {
+    const parsed = JSON.parse(String(rawValue ?? ''));
+    const normalized = normalizeStringList(parsed);
+    return normalized.length > 0 ? normalized : parsedFallback;
+  } catch {
+    return parsedFallback;
+  }
+};
+
+const buildLikeConditionSql = (columnSql, keywords, negate = false) => {
+  const normalized = normalizeStringList(keywords);
+  if (normalized.length === 0) {
+    return negate ? '1 = 1' : '1 = 0';
+  }
+
+  const operator = negate ? 'NOT LIKE' : 'LIKE';
+  const joiner = negate ? ' AND ' : ' OR ';
+  return normalized
+    .map((keyword) => `${columnSql} ${operator} ${sqlValue(`%${keyword}%`)}`)
+    .join(joiner);
+};
+
+const buildNotInListSql = (values) => {
+  const normalized = normalizeStringList(values);
+  if (normalized.length === 0) {
+    return "('income')";
+  }
+
+  return `(${normalized.map((value) => sqlValue(value)).join(', ')})`;
+};
+
+const getAnalyticsSettings = async (db) => {
+  const defaults = DEFAULT_ANALYTICS_SETTINGS;
+
+  const rows = rowify(await db.exec(`
+    SELECT key, value
+    FROM app_settings
+    WHERE key IN (
+      ${sqlValue(SETTINGS_KEYS.excludedCategoryKeywords)},
+      ${sqlValue(SETTINGS_KEYS.excludedDescriptionKeywords)},
+      ${sqlValue(SETTINGS_KEYS.reimbursementExcludedCategories)}
+    );
+  `));
+
+  const byKey = new Map(rows.map((row) => [String(row.key), row.value]));
+
+  const excludedCategoryKeywords = parseArraySettingValue(
+    byKey.get(SETTINGS_KEYS.excludedCategoryKeywords),
+    defaults[SETTINGS_KEYS.excludedCategoryKeywords],
+  );
+
+  const excludedDescriptionKeywords = parseArraySettingValue(
+    byKey.get(SETTINGS_KEYS.excludedDescriptionKeywords),
+    defaults[SETTINGS_KEYS.excludedDescriptionKeywords],
+  );
+
+  const reimbursementExcludedCategories = parseArraySettingValue(
+    byKey.get(SETTINGS_KEYS.reimbursementExcludedCategories),
+    defaults[SETTINGS_KEYS.reimbursementExcludedCategories],
+  );
+
+  if (!reimbursementExcludedCategories.includes('income')) {
+    reimbursementExcludedCategories.unshift('income');
+  }
+
+  return {
+    excludedCategoryKeywords,
+    excludedDescriptionKeywords,
+    reimbursementExcludedCategories,
+  };
+};
+
+const getAnalyticsSqlFragments = async (db) => {
+  const settings = await getAnalyticsSettings(db);
+
+  const categoryExcludedSql = buildLikeConditionSql(
+    "COALESCE(LOWER(category), '')",
+    settings.excludedCategoryKeywords,
+    false,
+  );
+
+  const descriptionExcludedSql = buildLikeConditionSql(
+    "COALESCE(LOWER(description), '')",
+    settings.excludedDescriptionKeywords,
+    false,
+  );
+
+  const categoryIncludedSql = buildLikeConditionSql(
+    "COALESCE(LOWER(category), '')",
+    settings.excludedCategoryKeywords,
+    true,
+  );
+
+  const descriptionIncludedSql = buildLikeConditionSql(
+    "COALESCE(LOWER(description), '')",
+    settings.excludedDescriptionKeywords,
+    true,
+  );
+
+  const excludedPatternSql = `(${categoryExcludedSql} OR ${descriptionExcludedSql})`;
+  const includedConditionSql = `(
+    manual_override = 0 OR (
+      manual_override IS NULL AND
+      ${categoryIncludedSql} AND
+      ${descriptionIncludedSql}
+    )
+  )`;
+
+  const reimbursementExcludedCategoriesSql = buildNotInListSql(settings.reimbursementExcludedCategories);
+
+  return {
+    excludedPatternSql,
+    includedConditionSql,
+    reimbursementExcludedCategoriesSql,
+  };
+};
+
+const serializeStringListSetting = (values, fallbackValues = []) => {
+  const normalized = normalizeStringList(values);
+  const fallback = normalizeStringList(fallbackValues);
+  const finalValues = normalized.length > 0 ? normalized : fallback;
+  return JSON.stringify(finalValues);
+};
 
 const toRule = (row) => ({
   id: Number(row.id),
@@ -359,7 +495,19 @@ export async function bootstrapSchema(db) {
       action_payload TEXT,
       is_active INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+
+  for (const [key, value] of Object.entries(DEFAULT_ANALYTICS_SETTINGS)) {
+    await db.exec(`
+      INSERT OR IGNORE INTO app_settings (key, value)
+      VALUES (${sqlValue(key)}, ${sqlValue(JSON.stringify(normalizeStringList(value)))});
+    `);
+  }
 
   const tableInfo = rowify(await db.exec('PRAGMA table_info(transactions);'));
   const columns = new Set(tableInfo.map((col) => String(col.name)));
@@ -417,6 +565,7 @@ export async function bootstrapSchema(db) {
 
 export async function getTransactions(db, { startDate, endDate, categories = [] } = {}) {
   if (!db) return [];
+  const { excludedPatternSql } = await getAnalyticsSqlFragments(db);
 
   const conditions = ['is_hidden = 0'];
   if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
@@ -443,7 +592,7 @@ export async function getTransactions(db, { startDate, endDate, categories = [] 
       CASE
         WHEN manual_override = 1 THEN 1
         WHEN manual_override = 0 THEN 0
-        WHEN ${EXCLUDED_PATTERN_SQL} THEN 1
+        WHEN ${excludedPatternSql} THEN 1
         ELSE 0
       END AS is_excluded
     FROM transactions
@@ -545,6 +694,87 @@ export async function getRules(db, { activeOnly = false } = {}) {
   `));
 
   return rows.map(toRule);
+}
+
+export async function getAnalyticsSettingsConfig(db) {
+  if (!db) return null;
+
+  await bootstrapSchema(db);
+  const settings = await getAnalyticsSettings(db);
+
+  return {
+    excluded_category_keywords: settings.excludedCategoryKeywords,
+    excluded_description_keywords: settings.excludedDescriptionKeywords,
+    reimbursement_excluded_categories: settings.reimbursementExcludedCategories,
+  };
+}
+
+export async function updateAnalyticsSettingsConfig(db, updates = {}) {
+  if (!db) {
+    throw new Error('Database is not initialized.');
+  }
+
+  await bootstrapSchema(db);
+
+  const nextExcludedCategoryKeywords = Array.isArray(updates.excluded_category_keywords)
+    ? updates.excluded_category_keywords
+    : DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.excludedCategoryKeywords];
+
+  const nextExcludedDescriptionKeywords = Array.isArray(updates.excluded_description_keywords)
+    ? updates.excluded_description_keywords
+    : DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.excludedDescriptionKeywords];
+
+  const nextReimbursementExcludedCategories = Array.isArray(updates.reimbursement_excluded_categories)
+    ? updates.reimbursement_excluded_categories
+    : DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.reimbursementExcludedCategories];
+
+  await db.exec('BEGIN TRANSACTION;');
+  let transactionCommitted = false;
+
+  try {
+    const records = [
+      {
+        key: SETTINGS_KEYS.excludedCategoryKeywords,
+        value: serializeStringListSetting(
+          nextExcludedCategoryKeywords,
+          DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.excludedCategoryKeywords],
+        ),
+      },
+      {
+        key: SETTINGS_KEYS.excludedDescriptionKeywords,
+        value: serializeStringListSetting(
+          nextExcludedDescriptionKeywords,
+          DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.excludedDescriptionKeywords],
+        ),
+      },
+      {
+        key: SETTINGS_KEYS.reimbursementExcludedCategories,
+        value: serializeStringListSetting(
+          nextReimbursementExcludedCategories,
+          DEFAULT_ANALYTICS_SETTINGS[SETTINGS_KEYS.reimbursementExcludedCategories],
+        ),
+      },
+    ];
+
+    for (const record of records) {
+      await db.exec(`
+        INSERT INTO app_settings (key, value)
+        VALUES (${sqlValue(record.key)}, ${sqlValue(record.value)})
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    }
+
+    await db.exec('COMMIT;');
+    transactionCommitted = true;
+    await saveDbToBrowser(db);
+  } catch (error) {
+    if (!transactionCommitted) {
+      await db.exec('ROLLBACK;');
+    }
+    throw error;
+  }
+
+  return getAnalyticsSettingsConfig(db);
 }
 
 export async function createRule(db, rule) {
@@ -896,11 +1126,16 @@ export async function undoSplitTransaction(db, transactionId) {
 }
 
 export async function getKpis(db, month) {
+  const {
+    includedConditionSql,
+    reimbursementExcludedCategoriesSql,
+  } = await getAnalyticsSqlFragments(db);
+
   const rows = rowify(await db.exec(`
     SELECT
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ('income', 'transfers', 'transfer', 'credit card payment') AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS total_reimbursements,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END)), 0) AS gross_expenses,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_reimbursements,
+      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
     FROM transactions
     WHERE strftime('%Y-%m', date) = ${sqlValue(month)}
@@ -922,6 +1157,11 @@ export async function getKpis(db, month) {
 }
 
 export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
+  const {
+    includedConditionSql,
+    reimbursementExcludedCategoriesSql,
+  } = await getAnalyticsSqlFragments(db);
+
   const dateConditions = [];
   if (startDate) dateConditions.push(`date >= ${sqlValue(startDate)}`);
   if (endDate) dateConditions.push(`date <= ${sqlValue(endDate)}`);
@@ -933,7 +1173,7 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
     FROM transactions
     WHERE amount < 0
       AND is_hidden = 0
-      AND ${INCLUDED_CONDITION_SQL}
+      AND ${includedConditionSql}
       ${dateClause}
     GROUP BY category
     ORDER BY total ASC;
@@ -941,10 +1181,10 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
 
   const totalRows = rowify(await db.exec(`
     SELECT
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END)), 0) AS gross_expenses,
+      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(CASE WHEN amount > 0
-        AND LOWER(category) NOT IN ('income', 'transfers', 'transfer', 'credit card payment')
-        AND ${INCLUDED_CONDITION_SQL}
+        AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql}
+        AND ${includedConditionSql}
       THEN amount ELSE 0 END), 0) AS reimbursed_amount
     FROM transactions
     WHERE 1=1
@@ -967,6 +1207,11 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
 }
 
 export async function getSpendingTrend(db, { startDate, endDate } = {}) {
+  const {
+    includedConditionSql,
+    reimbursementExcludedCategoriesSql,
+  } = await getAnalyticsSqlFragments(db);
+
   const conditions = ['is_hidden = 0'];
   if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
   if (endDate) conditions.push(`date <= ${sqlValue(endDate)}`);
@@ -976,9 +1221,9 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
   const rows = rowify(await db.exec(`
     SELECT
       strftime('%Y-%m', date) AS month,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ('income', 'transfers', 'transfer', 'credit card payment') AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END)), 0) AS gross_expenses,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
+      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
     FROM transactions
     ${whereClause}
@@ -1003,6 +1248,11 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
 }
 
 export async function getDailySpending(db, { startDate, endDate } = {}) {
+  const {
+    includedConditionSql,
+    reimbursementExcludedCategoriesSql,
+  } = await getAnalyticsSqlFragments(db);
+
   const conditions = ['is_hidden = 0'];
   if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
   if (endDate) conditions.push(`date <= ${sqlValue(endDate)}`);
@@ -1012,9 +1262,9 @@ export async function getDailySpending(db, { startDate, endDate } = {}) {
   const rows = rowify(await db.exec(`
     SELECT
       date AS day,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ('income', 'transfers', 'transfer', 'credit card payment') AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${INCLUDED_CONDITION_SQL} THEN amount ELSE 0 END)), 0) AS gross_expenses
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
+      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses
     FROM transactions
     ${whereClause}
     GROUP BY day

@@ -41,6 +41,14 @@ const createEmptyRule = () => ({
 
 const round2 = (value) => Math.round(Number(value || 0) * 100) / 100;
 
+const parseCsvInput = (value) => {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((item, index, arr) => arr.indexOf(item) === index);
+};
+
 const safeParseSplitPayload = (actionPayload) => {
   try {
     const parsed = typeof actionPayload === 'string' ? JSON.parse(actionPayload) : actionPayload;
@@ -85,6 +93,8 @@ export default function RulesDashboard() {
     updateRule,
     deleteRule,
     executeRuleOnDatabase,
+    getAnalyticsSettingsConfig,
+    updateAnalyticsSettingsConfig,
   } = useDatabase();
 
   const [rules, setRules] = useState([]);
@@ -95,6 +105,12 @@ export default function RulesDashboard() {
   const [splitLines, setSplitLines] = useState([createSplitLine(), createSplitLine()]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runningRuleId, setRunningRuleId] = useState(null);
+  const [settingsForm, setSettingsForm] = useState({
+    excludedCategoryKeywords: '',
+    excludedDescriptionKeywords: '',
+    reimbursementExcludedCategories: '',
+  });
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   const splitTotal = useMemo(
     () => round2(splitLines.reduce((sum, line) => sum + (Number.isFinite(line.amount) ? line.amount : 0), 0)),
@@ -120,6 +136,24 @@ export default function RulesDashboard() {
     }
   };
 
+  const loadAnalyticsSettings = async () => {
+    if (!db) return;
+
+    try {
+      const config = await getAnalyticsSettingsConfig();
+      if (!config) return;
+
+      setSettingsForm({
+        excludedCategoryKeywords: (config.excluded_category_keywords || []).join(', '),
+        excludedDescriptionKeywords: (config.excluded_description_keywords || []).join(', '),
+        reimbursementExcludedCategories: (config.reimbursement_excluded_categories || []).join(', '),
+      });
+    } catch (error) {
+      console.error(error);
+      setAlert({ type: 'error', message: 'Failed to load analytics defaults.' });
+    }
+  };
+
   useEffect(() => {
     if (!isReady || !db) return;
 
@@ -127,6 +161,7 @@ export default function RulesDashboard() {
       try {
         await bootstrapSchema(db);
         await loadRules();
+        await loadAnalyticsSettings();
       } catch (error) {
         console.error(error);
         setAlert({ type: 'error', message: 'Failed to initialize the rules schema.' });
@@ -136,6 +171,37 @@ export default function RulesDashboard() {
 
     initialize();
   }, [db, isReady, dbName]);
+
+  const handleSettingsInputChange = (event) => {
+    const { name, value } = event.target;
+    setSettingsForm((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  const handleSaveAnalyticsSettings = async (event) => {
+    event.preventDefault();
+
+    try {
+      setIsSavingSettings(true);
+      setAlert(null);
+
+      await updateAnalyticsSettingsConfig({
+        excluded_category_keywords: parseCsvInput(settingsForm.excludedCategoryKeywords),
+        excluded_description_keywords: parseCsvInput(settingsForm.excludedDescriptionKeywords),
+        reimbursement_excluded_categories: parseCsvInput(settingsForm.reimbursementExcludedCategories),
+      });
+
+      await loadAnalyticsSettings();
+      setAlert({ type: 'success', message: 'Analytics defaults updated successfully.' });
+    } catch (error) {
+      console.error(error);
+      setAlert({ type: 'error', message: error?.message || 'Failed to save analytics defaults.' });
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
 
   const resetForm = () => {
     setEditingRuleId(null);
@@ -351,6 +417,61 @@ export default function RulesDashboard() {
           <span className="font-medium text-sm sm:text-base leading-snug">{alert.message}</span>
         </div>
       )}
+
+      <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60">
+          <h2 className="text-lg font-semibold text-gray-900">Analytics defaults</h2>
+          <p className="text-sm text-gray-500 mt-1">Comma-separated keywords and categories used for exclusion and reimbursement math.</p>
+        </div>
+
+        <form onSubmit={handleSaveAnalyticsSettings} className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-4 items-end">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Excluded category keywords</label>
+            <input
+              type="text"
+              name="excludedCategoryKeywords"
+              value={settingsForm.excludedCategoryKeywords}
+              onChange={handleSettingsInputChange}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+              placeholder="transfer, saving"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Excluded description keywords</label>
+            <input
+              type="text"
+              name="excludedDescriptionKeywords"
+              value={settingsForm.excludedDescriptionKeywords}
+              onChange={handleSettingsInputChange}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+              placeholder="bill payment, payment thank you"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Reimbursement-excluded categories</label>
+            <input
+              type="text"
+              name="reimbursementExcludedCategories"
+              value={settingsForm.reimbursementExcludedCategories}
+              onChange={handleSettingsInputChange}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+              placeholder="income, transfers, credit card payment"
+            />
+          </div>
+
+          <div className="lg:col-span-3 flex justify-end">
+            <button
+              type="submit"
+              disabled={isSavingSettings}
+              className="inline-flex items-center justify-center px-5 py-2.5 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 hover:shadow-md transition-all disabled:opacity-75"
+            >
+              {isSavingSettings ? 'Saving...' : 'Save Analytics Defaults'}
+            </button>
+          </div>
+        </form>
+      </section>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] gap-8 items-start">
         <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">

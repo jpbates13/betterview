@@ -4,7 +4,9 @@ import {
   createRule as createRuleRecord,
   deleteRule as deleteRuleRecord,
   executeRuleOnDatabase as executeRuleOnDatabaseRecord,
+  getAnalyticsSettingsConfig as getAnalyticsSettingsConfigRecord,
   getRules as getRulesRecord,
+  updateAnalyticsSettingsConfig as updateAnalyticsSettingsConfigRecord,
   updateRule as updateRuleRecord,
 } from './dbQueries.js';
 
@@ -172,6 +174,17 @@ export function DatabaseProvider({ children }) {
     return executeRuleOnDatabaseRecord(ensureDb(), rule);
   }, [ensureDb]);
 
+  const getAnalyticsSettingsConfig = useCallback(async () => {
+    return getAnalyticsSettingsConfigRecord(ensureDb());
+  }, [ensureDb]);
+
+  const updateAnalyticsSettingsConfig = useCallback(async (updates) => {
+    const result = await updateAnalyticsSettingsConfigRecord(ensureDb(), updates);
+    notifyDataChanged();
+    triggerMutation();
+    return result;
+  }, [ensureDb, notifyDataChanged, triggerMutation]);
+
   const value = useMemo(() => ({
     db,
     dbName,
@@ -190,6 +203,8 @@ export function DatabaseProvider({ children }) {
     updateRule,
     deleteRule,
     executeRuleOnDatabase,
+    getAnalyticsSettingsConfig,
+    updateAnalyticsSettingsConfig,
   }), [
     db,
     dbName,
@@ -208,6 +223,8 @@ export function DatabaseProvider({ children }) {
     updateRule,
     deleteRule,
     executeRuleOnDatabase,
+    getAnalyticsSettingsConfig,
+    updateAnalyticsSettingsConfig,
   ]);
 
   return <DatabaseContext.Provider value={value}>{children}</DatabaseContext.Provider>;
