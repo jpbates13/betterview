@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { CheckCircle, AlertCircle, RefreshCw, Plus, UploadCloud, LogOut } from 'lucide-react';
+import { CheckCircle, AlertCircle, RefreshCw, Plus, UploadCloud, LogOut, Sparkles, X } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import DataTable from '../components/DataTable';
 import TransactionModal from '../components/TransactionModal';
 import SplitTransactionModal from '../components/SplitTransactionModal';
@@ -18,6 +19,9 @@ import {
 } from '../dbQueries.js';
 import { importCsvToDatabase } from '../csvImporter.js';
 
+const ONBOARDING_DISMISSED_KEY = 'betterview.onboarding.dismissed.v1';
+const ONBOARDING_COMPLETED_KEY = 'betterview.onboarding.completed.v1';
+
 export default function Dashboard() {
   const { db, dbName, isReady, error: dbError, notifyDataChanged, lastMutationTime, triggerMutation } = useDatabase() as any;
   const { accessToken, clearAccessToken } = useDriveSync() as any;
@@ -34,6 +38,41 @@ export default function Dashboard() {
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [splitTx, setSplitTx] = useState<any | null>(null);
   const [isDraggingCsv, setIsDraggingCsv] = useState(false);
+  const [isOnboardingDismissed, setIsOnboardingDismissed] = useState(false);
+  const [isOnboardingCompleted, setIsOnboardingCompleted] = useState(false);
+
+  useEffect(() => {
+    try {
+      setIsOnboardingDismissed(window.localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1');
+      setIsOnboardingCompleted(window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === '1');
+    } catch {
+      setIsOnboardingDismissed(false);
+      setIsOnboardingCompleted(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (transactions.length === 0) return;
+
+    setIsOnboardingCompleted(true);
+    setIsOnboardingDismissed(true);
+
+    try {
+      window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, '1');
+      window.localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  }, [transactions.length]);
+
+  const dismissOnboarding = () => {
+    setIsOnboardingDismissed(true);
+    try {
+      window.localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  };
 
   const markMutation = () => {
     notifyDataChanged();
@@ -47,6 +86,8 @@ export default function Dashboard() {
     if (syncStatus === 'synced') return 'Cloud Synced ✅';
     return 'Cloud Connected ✅';
   })();
+
+  const shouldShowOnboarding = !isLoading && transactions.length === 0 && !isOnboardingCompleted && !isOnboardingDismissed;
 
   const fetchTransactions = async () => {
     if (!db) {
@@ -327,6 +368,65 @@ export default function Dashboard() {
             <AlertCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-red-600" />
           )}
           <span className="font-medium text-sm sm:text-base leading-snug">{alert.message}</span>
+        </div>
+      )}
+
+      {shouldShowOnboarding && (
+        <div className="relative overflow-hidden rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-emerald-50 p-6 shadow-sm">
+          <div className="absolute right-3 top-3">
+            <button
+              onClick={dismissOnboarding}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-gray-500 hover:bg-white/70 hover:text-gray-700 transition-colors"
+              title="Dismiss onboarding"
+              aria-label="Dismiss onboarding"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="flex items-start gap-4">
+            <div className="mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-sky-200 bg-white">
+              <Sparkles className="h-5 w-5 text-sky-600" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-gray-900">Welcome to BetterView</h2>
+              <p className="mt-1 text-sm text-gray-700">
+                Your dashboard is ready. Next step: import your first CSV so your transactions and analytics can populate.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border border-white/70 bg-white/80 p-4">
+              <p className="text-xs font-semibold tracking-wide text-sky-700">STEP 1</p>
+              <p className="mt-1 text-sm text-gray-800">Upload a Fidelity FullView CSV from the Upload button or drag-and-drop zone below.</p>
+            </div>
+            <div className="rounded-xl border border-white/70 bg-white/80 p-4">
+              <p className="text-xs font-semibold tracking-wide text-sky-700">STEP 2</p>
+              <p className="mt-1 text-sm text-gray-800">Create rules to auto-categorize future imports and save cleanup time.</p>
+            </div>
+            <div className="rounded-xl border border-white/70 bg-white/80 p-4">
+              <p className="text-xs font-semibold tracking-wide text-sky-700">STEP 3</p>
+              <p className="mt-1 text-sm text-gray-800">Review Analytics once imported data is synced to your cloud DB.</p>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isImportingCsv}
+              className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-sky-600 text-white font-medium hover:bg-sky-700 transition-colors disabled:opacity-70"
+            >
+              <UploadCloud className="h-4 w-4 mr-2" />
+              Import first CSV
+            </button>
+            <Link
+              to="/rules"
+              className="inline-flex items-center justify-center px-4 py-2 rounded-lg border border-sky-200 text-sky-800 bg-white hover:bg-sky-50 transition-colors font-medium"
+            >
+              Set up rules
+            </Link>
+          </div>
         </div>
       )}
 

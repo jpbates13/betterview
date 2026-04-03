@@ -8,11 +8,11 @@ import RulesDashboard from './pages/RulesDashboard.jsx';
 import { useDriveSync } from './DriveSyncContext.jsx';
 import { useDatabase } from './DatabaseContext.jsx';
 import { downloadDbFromDrive } from './DriveSyncEngine.js';
-import { saveDbBytesToBrowser } from './dbStorage.js';
+import { clearDbFromBrowser, saveDbBytesToBrowser } from './dbStorage.js';
 
 function DashboardApp() {
   const { accessToken } = useDriveSync();
-  const { reloadDatabaseFromBrowser } = useDatabase() as any;
+  const { createEmptyDatabase, reloadDatabaseFromBrowser } = useDatabase() as any;
   const [isHydratingCloudDb, setIsHydratingCloudDb] = useState(true);
   const hydratedTokenRef = useRef('');
 
@@ -34,6 +34,10 @@ function DashboardApp() {
       if (isMounted) setIsHydratingCloudDb(true);
 
       try {
+        // Prevent local data bleed when a different account signs in on this browser.
+        await clearDbFromBrowser();
+        await createEmptyDatabase();
+
         const cloudDb = await downloadDbFromDrive(accessToken);
         if (!cloudDb) return;
 
@@ -51,7 +55,7 @@ function DashboardApp() {
     return () => {
       isMounted = false;
     };
-  }, [accessToken, reloadDatabaseFromBrowser]);
+  }, [accessToken, createEmptyDatabase, reloadDatabaseFromBrowser]);
 
   if (isHydratingCloudDb) {
     return (

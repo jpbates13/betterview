@@ -43,3 +43,7 @@ export async function saveDbBytesToBrowser(bytes) {
   await localforage.setItem(DB_STORAGE_KEY, data);
   return data;
 }
+
+export async function clearDbFromBrowser() {
+  await localforage.removeItem(DB_STORAGE_KEY);
+}

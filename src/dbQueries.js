@@ -119,7 +119,24 @@ const buildNotInListSql = (values) => {
   return `(${normalized.map((value) => sqlValue(value)).join(', ')})`;
 };
 
+const ensureAppSettingsSchema = async (db) => {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  for (const [key, value] of Object.entries(DEFAULT_ANALYTICS_SETTINGS)) {
+    await db.exec(`
+      INSERT OR IGNORE INTO app_settings (key, value)
+      VALUES (${sqlValue(key)}, ${sqlValue(JSON.stringify(normalizeStringList(value)))});
+    `);
+  }
+};
+
 const getAnalyticsSettings = async (db) => {
+  await ensureAppSettingsSchema(db);
   const defaults = DEFAULT_ANALYTICS_SETTINGS;
 
   const rows = rowify(await db.exec(`
@@ -502,12 +519,7 @@ export async function bootstrapSchema(db) {
     );
   `);
 
-  for (const [key, value] of Object.entries(DEFAULT_ANALYTICS_SETTINGS)) {
-    await db.exec(`
-      INSERT OR IGNORE INTO app_settings (key, value)
-      VALUES (${sqlValue(key)}, ${sqlValue(JSON.stringify(normalizeStringList(value)))});
-    `);
-  }
+  await ensureAppSettingsSchema(db);
 
   const tableInfo = rowify(await db.exec('PRAGMA table_info(transactions);'));
   const columns = new Set(tableInfo.map((col) => String(col.name)));
