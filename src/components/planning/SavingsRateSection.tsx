@@ -6,10 +6,9 @@ import {
 import { getMonthlySavingsRate, getYearSummary } from '../../db/features.js';
 import { Empty, ErrorNote, Kpi, Loading, Section } from './ui';
 import { money, moneyWhole, monthLabel, percent, todayIso, useDbData } from './shared';
-import type { Db } from './shared';
+import type { DbApi, MonthlySavings } from '../../types';
 
-type MonthPoint = { month: string; income: number; spent: number; saved: number; savingsRate: number | null };
-type Data = { series: MonthPoint[]; yearRate: number | null; yearIncome: number; yearSpent: number };
+type Data = { series: MonthlySavings[]; yearRate: number | null; yearIncome: number; yearSpent: number };
 
 const INCOME_COLOR = '#10B981';
 const SPENT_COLOR = '#64748B';
@@ -22,12 +21,12 @@ const rateTone = (rate: number | null) => (rate === null ? 'neutral' : rate < 0 
 export default function SavingsRateSection() {
   const today = todayIso();
   const [months, setMonths] = useState<number>(12);
-  const load = useCallback(async (db: Db): Promise<Data> => {
+  const load = useCallback(async (db: DbApi): Promise<Data> => {
     const [series, year] = await Promise.all([
       getMonthlySavingsRate(db, { months, today }),
       getYearSummary(db, Number(today.slice(0, 4))),
     ]);
-    return { series: series as MonthPoint[], yearRate: year.savingsRate, yearIncome: year.income, yearSpent: year.netSpent };
+    return { series, yearRate: year.savingsRate, yearIncome: year.income, yearSpent: year.netSpent };
   }, [months, today]);
   const { data, isLoading, error } = useDbData(load, { series: [], yearRate: null, yearIncome: 0, yearSpent: 0 } as Data);
 

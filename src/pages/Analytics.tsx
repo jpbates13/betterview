@@ -3,13 +3,13 @@ import { subMonths, startOfYear, endOfYear, format, parseISO, lastDayOfMonth, su
 import SpendingTrendChart from '../components/charts/SpendingTrendChart';
 import CategoryBreakdownChart from '../components/charts/CategoryBreakdownChart';
 import DataTable from '../components/DataTable';
-import TransactionModal from '../components/TransactionModal';
+import TransactionModal, { type TransactionFormData } from '../components/TransactionModal';
 import SplitTransactionModal from '../components/SplitTransactionModal';
 import { AlertTriangle, Maximize2, Minimize2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
-import SpendPacingChart from '../components/charts/SpendPacingChart';
+import SpendPacingChart, { type PacingData, type SpikeTransaction } from '../components/charts/SpendPacingChart';
 import LifestyleInflationDial from '../components/charts/LifestyleInflationDial';
-import { useDatabase } from '../DatabaseContext.jsx';
+import { useDatabase } from '../useDatabase';
 import { getBudgets } from '../db/features.js';
 import { Kpi } from '../components/planning/ui';
 import { money, moneyWhole, percent } from '../components/planning/shared';
@@ -25,20 +25,9 @@ import {
   undoSplitTransaction,
   updateTransaction,
 } from '../dbQueries.js';
+import type { Budget, CategorySpending, CategoryTotal, Transaction, TrendPoint } from '../types';
 
 type FilterOption = 'Month to Date' | 'Last 3 Months' | 'Year to Date' | 'All Time' | 'Custom';
-
-type CategoryTotal = { category: string; total: number };
-
-type PacingTopTransaction = {
-  id: number;
-  date: string;
-  description: string;
-  category: string;
-  account: string;
-  amount: number;
-  spend_impact: number;
-};
 
 const REIMBURSEMENT_EXCLUDE_CATEGORIES = new Set(['income', 'transfers', 'transfer', 'credit card payment']);
 
@@ -53,8 +42,8 @@ const isCompleteISODate = (value: string): boolean => {
   return !Number.isNaN(parsed.getTime()) && format(parsed, 'yyyy-MM-dd') === value;
 };
 
-const buildTopTransactionMapByDate = (transactions: any[]): Map<string, PacingTopTransaction> => {
-  const byDate = new Map<string, PacingTopTransaction>();
+const buildTopTransactionMapByDate = (transactions: Transaction[]): Map<string, SpikeTransaction> => {
+  const byDate = new Map<string, SpikeTransaction>();
 
   transactions.forEach((tx) => {
     if (tx?.is_excluded) return;
@@ -69,7 +58,7 @@ const buildTopTransactionMapByDate = (transactions: any[]): Map<string, PacingTo
 
     if (spendImpact <= 0 || !tx.date) return;
 
-    const candidate: PacingTopTransaction = {
+    const candidate: SpikeTransaction = {
       id: tx.id,
       date: tx.date,
       description: tx.description,
@@ -89,32 +78,32 @@ const buildTopTransactionMapByDate = (transactions: any[]): Map<string, PacingTo
 };
 
 export default function Analytics() {
-  const { db, isReady, dbName, dataVersion } = useDatabase() as any;
+  const { db, isReady, dbName, dataVersion } = useDatabase();
 
   const [filter, setFilter] = useState<FilterOption>('Month to Date');
   const [showSpikeMarkers, setShowSpikeMarkers] = useState(false);
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');
-  const [trendData, setTrendData] = useState<any[]>([]);
-  const [categoryData, setCategoryData] = useState<any>({ categories: [], total_gross_expenses: 0, total_net_expenses: 0 });
+  const [trendData, setTrendData] = useState<TrendPoint[]>([]);
+  const [categoryData, setCategoryData] = useState<CategorySpending>({ categories: [], total_gross_expenses: 0, total_net_expenses: 0 });
   const [totalIncomeAmount, setTotalIncomeAmount] = useState(0);
-  const [pacingData, setPacingData] = useState<any[]>([]);
+  const [pacingData, setPacingData] = useState<PacingData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [comparisonMode, setComparisonMode] = useState<'previous-period' | 'previous-year'>('previous-period');
-  const [budgets, setBudgets] = useState<{ category: string; monthly_amount: number }[]>([]);
+  const [budgets, setBudgets] = useState<Budget[]>([]);
 
   // Expanded chart state
   const [expandedChart, setExpandedChart] = useState<'trend' | 'category' | 'spend-pacing' | null>(null);
 
   // Drilldown state
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
-  const [monthTransactions, setMonthTransactions] = useState<any[]>([]);
+  const [monthTransactions, setMonthTransactions] = useState<Transaction[]>([]);
   const [isLoadingMonth, setIsLoadingMonth] = useState(false);
   const drilldownRef = useRef<HTMLDivElement>(null);
 
   // Category Drilldown state
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [categoryTransactions, setCategoryTransactions] = useState<any[]>([]);
+  const [categoryTransactions, setCategoryTransactions] = useState<Transaction[]>([]);
   const [isLoadingCategory, setIsLoadingCategory] = useState(false);
   const categoryDrilldownRef = useRef<HTMLDivElement>(null);
 
@@ -122,9 +111,9 @@ export default function Analytics() {
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedTx, setSelectedTx] = useState<any | null>(null);
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
-  const [splitTx, setSplitTx] = useState<any | null>(null);
+  const [splitTx, setSplitTx] = useState<Transaction | null>(null);
 
   const isValidCustomRange = useMemo(() => {
     if (!isCompleteISODate(customStartDate) || !isCompleteISODate(customEndDate)) {
@@ -243,9 +232,9 @@ export default function Analytics() {
           prevStartDate && prevEndDate
             ? getDailySpending(db, { startDate: prevStartDate, endDate: prevEndDate })
             : Promise.resolve([]),
-          getTransactions(db, { startDate: startDate || undefined, endDate: endDate || undefined } as any),
+          getTransactions(db, { startDate: startDate || undefined, endDate: endDate || undefined }),
           prevStartDate && prevEndDate
-            ? getTransactions(db, { startDate: prevStartDate, endDate: prevEndDate } as any)
+            ? getTransactions(db, { startDate: prevStartDate, endDate: prevEndDate })
             : Promise.resolve([]),
         ]);
 
@@ -253,7 +242,7 @@ export default function Analytics() {
         setCategoryData(categoryRows);
 
         // Calculate total income from trend data
-        const totalIncome = (trendRows || []).reduce((sum: number, month: any) => sum + (month.total_income || 0), 0);
+        const totalIncome = (trendRows || []).reduce((sum, month) => sum + (month.total_income || 0), 0);
         setTotalIncomeAmount(totalIncome);
 
         // Process pacing data
@@ -288,10 +277,10 @@ export default function Analytics() {
           let currIncomeSum = 0;
           let prevIncomeSum = 0;
 
-          const currSpendMap = new Map<string, number>(currDaily.map((d: any) => [d.date, Number(d.net_expenses)]));
-          const prevSpendMap = new Map<string, number>(prevDaily.map((d: any) => [d.date, Number(d.net_expenses)]));
-          const currIncomeMap = new Map<string, number>(currDaily.map((d: any) => [d.date, Number(d.total_income)]));
-          const prevIncomeMap = new Map<string, number>(prevDaily.map((d: any) => [d.date, Number(d.total_income)]));
+          const currSpendMap = new Map<string, number>(currDaily.map((d): [string, number] => [d.date, Number(d.net_expenses)]));
+          const prevSpendMap = new Map<string, number>(prevDaily.map((d): [string, number] => [d.date, Number(d.net_expenses)]));
+          const currIncomeMap = new Map<string, number>(currDaily.map((d): [string, number] => [d.date, Number(d.total_income)]));
+          const prevIncomeMap = new Map<string, number>(prevDaily.map((d): [string, number] => [d.date, Number(d.total_income)]));
 
           const pData = [];
           for (let i = 0; i < maxDays; i++) {
@@ -367,7 +356,7 @@ export default function Analytics() {
         const firstDay = format(new Date(year, month, 1), 'yyyy-MM-dd');
         const lastDay = format(lastDayOfMonth(new Date(year, month, 1)), 'yyyy-MM-dd');
 
-        const rows = await getTransactions(db, { startDate: firstDay, endDate: lastDay } as any);
+        const rows = await getTransactions(db, { startDate: firstDay, endDate: lastDay });
         setMonthTransactions(rows);
 
         // Slight delay to allow DOM render before scrolling
@@ -442,7 +431,7 @@ export default function Analytics() {
           categories,
           startDate: localStartDate,
           endDate: localEndDate,
-        } as any);
+        });
         setCategoryTransactions(rows);
 
         // Slight delay to allow DOM render before scrolling
@@ -464,7 +453,7 @@ export default function Analytics() {
 
     try {
       await overrideTransaction(db, id, status);
-      const updateFn = (prev: any[]) => prev.map((tx: any) =>
+      const updateFn = (prev: Transaction[]) => prev.map((tx) =>
         tx.id === id ? {
           ...tx,
           manual_override: status,
@@ -480,19 +469,19 @@ export default function Analytics() {
     }
   };
 
-  const openEditModal = (tx: any) => {
+  const openEditModal = (tx: Transaction) => {
     setSelectedTx(tx);
     setIsModalOpen(true);
   };
 
-  const handleUpdateTransaction = async (formData: any) => {
+  const handleUpdateTransaction = async (formData: TransactionFormData) => {
     try {
       if (!selectedTx) return;
       const payload = { ...selectedTx, ...formData };
       if (!db) return;
       await updateTransaction(db, selectedTx.id, payload);
 
-      const updateFn = (prev: any[]) => prev.map((tx: any) =>
+      const updateFn = (prev: Transaction[]) => prev.map((tx) =>
         tx.id === selectedTx.id ? { ...tx, ...formData } : tx
       );
       if (selectedMonth) setMonthTransactions(updateFn);
@@ -504,7 +493,7 @@ export default function Analytics() {
     }
   };
 
-  const handleDeleteTransaction = async (tx: any) => {
+  const handleDeleteTransaction = async (tx: Transaction) => {
     if (!db) return;
 
     const confirmed = window.confirm(
@@ -515,10 +504,10 @@ export default function Analytics() {
     try {
       await deleteTransaction(db, tx.id);
       if (selectedMonth) {
-        setMonthTransactions(prev => prev.filter((row: any) => row.id !== tx.id));
+        setMonthTransactions(prev => prev.filter((row) => row.id !== tx.id));
       }
       if (selectedCategory) {
-        setCategoryTransactions(prev => prev.filter((row: any) => row.id !== tx.id));
+        setCategoryTransactions(prev => prev.filter((row) => row.id !== tx.id));
       }
       setRefreshTrigger(p => p + 1);
     } catch (err) {
@@ -527,7 +516,7 @@ export default function Analytics() {
     }
   };
 
-  const openSplitModal = (tx: any) => {
+  const openSplitModal = (tx: Transaction) => {
     setSplitTx(tx);
     setIsSplitModalOpen(true);
   };
@@ -537,13 +526,13 @@ export default function Analytics() {
     try {
       await splitTransaction(db, splitTx.id, payload);
       setRefreshTrigger((p) => p + 1);
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      throw new Error(err?.message || 'Failed to split transaction');
+      throw new Error((err instanceof Error && err.message) || 'Failed to split transaction');
     }
   };
 
-  const handleUndoSplit = async (tx: any) => {
+  const handleUndoSplit = async (tx: Transaction) => {
     if (!db) return;
 
     const confirmed = window.confirm(

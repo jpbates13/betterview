@@ -18,32 +18,30 @@ import {
   useDbData,
   useMutation,
 } from './shared';
-import type { Db } from './shared';
+import type { AccountBalance, DbApi, NetWorthPoint } from '../../types';
 
-type Snapshot = { id: number; account: string; date: string; balance: number };
-type Point = { date: string; netWorth: number; byAccount: Record<string, number> };
-type Data = { snapshots: Snapshot[]; series: Point[]; accounts: string[] };
+type Data = { snapshots: AccountBalance[]; series: NetWorthPoint[]; accounts: string[] };
 
 const NET_WORTH_COLOR = '#2563EB';
 
 export default function NetWorthSection() {
   const today = todayIso();
-  const load = useCallback(async (db: Db): Promise<Data> => {
+  const load = useCallback(async (db: DbApi): Promise<Data> => {
     const [snapshots, series, accountRows] = await Promise.all([
       getAccountBalances(db),
       getNetWorthSeries(db, { months: 24, today }),
       db.exec("SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL AND TRIM(account) <> '' ORDER BY account;"),
     ]);
-    const fromTransactions = ((accountRows[0] as { values?: unknown[][] } | undefined)?.values ?? []).map((row) => String(row[0]));
-    const typed = (snapshots as Snapshot[]).map((s) => ({ ...s, id: Number(s.id), balance: Number(s.balance) }));
+    const fromTransactions = (accountRows[0]?.values ?? []).map((row) => String(row[0]));
+    const typed = snapshots.map((s) => ({ ...s, id: Number(s.id), balance: Number(s.balance) }));
     const accounts = [...new Set([...typed.map((s) => s.account), ...fromTransactions])].sort((a, b) => a.localeCompare(b));
-    return { snapshots: typed, series: series as Point[], accounts };
+    return { snapshots: typed, series, accounts };
   }, [today]);
   const { data, isLoading, error: loadError } = useDbData(load, { snapshots: [], series: [], accounts: [] } as Data);
   const mutate = useMutation();
 
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [editing, setEditing] = useState<Snapshot | null>(null);
+  const [editing, setEditing] = useState<AccountBalance | null>(null);
   const [account, setAccount] = useState('');
   const [date, setDate] = useState(today);
   const [balance, setBalance] = useState('');
@@ -51,7 +49,7 @@ export default function NetWorthSection() {
   const [isSaving, setIsSaving] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
-  const openForm = (snapshot?: Snapshot) => {
+  const openForm = (snapshot?: AccountBalance) => {
     setEditing(snapshot ?? null);
     setAccount(snapshot?.account ?? '');
     setDate(snapshot?.date ?? today);
@@ -86,7 +84,7 @@ export default function NetWorthSection() {
     }
   };
 
-  const handleDelete = async (snapshot: Snapshot) => {
+  const handleDelete = async (snapshot: AccountBalance) => {
     if (!window.confirm(`Delete the ${snapshot.account} balance from ${snapshot.date}?`)) return;
     try {
       await mutate((db) => deleteAccountBalance(db, snapshot.id));

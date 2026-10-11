@@ -5,13 +5,11 @@ import { bootstrapSchema } from '../../dbQueries.js';
 import { addMerchantRule, deleteMerchantRule, getMerchantRules } from '../../db/merchants-store.js';
 import { Empty, ErrorNote, Loading, Section } from '../planning/ui';
 import { dangerIconButtonClass, errorMessage, inputClass, primaryButtonClass, useDbData, useMutation } from '../planning/shared';
-import type { Db } from '../planning/shared';
+import type { DbApi, MerchantRule } from '../../types';
 
-type MerchantRule = { id: number; pattern: string; merchant: string };
-
-const loadRules = async (db: Db) => {
+const loadRules = async (db: DbApi) => {
   await bootstrapSchema(db);
-  return (await getMerchantRules(db)) as MerchantRule[];
+  return getMerchantRules(db);
 };
 
 export default function MerchantRulesSection() {

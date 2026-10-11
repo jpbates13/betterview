@@ -158,10 +158,6 @@ export async function getLinkedReimbursements(db, expenseId) {
 }
 
 // Positive rows not yet linked to anything, as candidates for linking.
-/**
- * @param {any} db
- * @param {{ aroundDate?: string, days?: number }} [options]
- */
 export async function getUnlinkedCredits(db, { aroundDate, days = 60 } = {}) {
   const params = [];
   let dateSql = '';

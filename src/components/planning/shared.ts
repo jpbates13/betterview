@@ -1,32 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useDatabase } from '../../DatabaseContext.jsx';
+import { useDatabase } from '../../useDatabase';
+import type { DbApi } from '../../types';
 
-// Shape of the worker-backed db api from DatabaseContext.
-export type Db = {
-  exec: (sql: string, params?: unknown[]) => Promise<unknown[]>;
-  export: () => Promise<Uint8Array>;
+export const errorMessage = (err: unknown, fallback = 'Something went wrong.'): string => {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) return err;
+  return fallback;
 };
-
-type DatabaseApi = {
-  db: Db | null;
-  isReady: boolean;
-  dataVersion: number;
-  exportDatabase: () => Promise<Uint8Array>;
-  loadDatabaseFile: (file: File) => Promise<void>;
-  triggerMutation: () => void;
-  notifyDataChanged: () => void;
-};
-
-export function useDb(): DatabaseApi {
-  return useDatabase() as unknown as DatabaseApi;
-}
-
-export const errorMessage = (err: unknown, fallback = 'Something went wrong.') =>
-  err instanceof Error && err.message ? err.message : fallback;
 
 /** Loads data from the database and reloads it whenever the data changes. */
-export function useDbData<T>(load: (db: Db) => Promise<T>, initial: T) {
-  const { db, isReady, dataVersion } = useDb();
+export function useDbData<T>(load: (db: DbApi) => Promise<T>, initial: T) {
+  const { db, isReady, dataVersion } = useDatabase();
   // Remembers which request produced the current data, so "loading" is derived rather than set.
   const [state, setState] = useState<{ data: T; error: string; source: unknown[] | null }>({
     data: initial,
@@ -60,8 +44,8 @@ export function useDbData<T>(load: (db: Db) => Promise<T>, initial: T) {
 
 /** Runs a change against the database, then refreshes every page and queues a Drive sync. */
 export function useMutation() {
-  const { db, triggerMutation, notifyDataChanged } = useDb();
-  return useCallback(async <T,>(change: (db: Db) => Promise<T>): Promise<T> => {
+  const { db, triggerMutation, notifyDataChanged } = useDatabase();
+  return useCallback(async <T,>(change: (db: DbApi) => Promise<T>): Promise<T> => {
     if (!db) throw new Error('The database is still loading.');
     const result = await change(db);
     triggerMutation();

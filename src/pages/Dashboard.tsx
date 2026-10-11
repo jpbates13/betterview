@@ -7,19 +7,14 @@ import SplitTransactionModal from '../components/SplitTransactionModal';
 import CsvMappingModal from '../components/transactions/CsvMappingModal';
 import ImportResultsPanel from '../components/transactions/ImportResultsPanel';
 import BulkActionBar from '../components/transactions/BulkActionBar';
-import {
-  errorMessage,
-  type CsvProfile,
-  type DatabaseContextValue,
-  type ImportSummary,
-  type Transaction,
-} from '../components/transactions/types';
-import { getTransactions } from '../components/transactions/api';
-import { useDatabase } from '../DatabaseContext.jsx';
+import { errorMessage } from '../components/planning/shared';
+import type { CsvProfile, DbApi, ImportSummary, Transaction } from '../types';
+import { useDatabase } from '../useDatabase';
 import {
   bootstrapSchema,
   createTransaction,
   deleteTransaction,
+  getTransactions,
   overrideTransaction,
   splitTransaction,
   undoSplitTransaction,
@@ -48,7 +43,7 @@ type MappingRequest = { file: File; headers: string[]; sampleRows: Array<Record<
 // bootstrapSchema has no guard against two overlapping runs on a fresh database (both try the
 // same ALTER TABLE), which React's dev double-mount triggers. Share one run per database here.
 const schemaReady = new WeakMap<object, Promise<void>>();
-const ensureSchema = (db: NonNullable<DatabaseContextValue['db']>) => {
+const ensureSchema = (db: DbApi) => {
   let pending = schemaReady.get(db);
   if (!pending) {
     pending = Promise.resolve(bootstrapSchema(db)).catch((err) => {
@@ -86,7 +81,7 @@ const commonMatchValue = (rows: Transaction[]): string => {
 };
 
 export default function Dashboard() {
-  const { db, dbName, isReady, error: dbError, dataVersion, notifyDataChanged, triggerMutation } = useDatabase() as DatabaseContextValue;
+  const { db, dbName, isReady, error: dbError, dataVersion, notifyDataChanged, triggerMutation } = useDatabase();
   const navigate = useNavigate();
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -178,7 +173,7 @@ export default function Dashboard() {
   // ── CSV import ─────────────────────────────────────────────────────────────
 
   const runImport = async (file: File, options?: { profile: CsvProfile }) => {
-    const summary = (await importCsvToDatabase(file, db, options)) as ImportSummary;
+    const summary = await importCsvToDatabase(file, db, options);
     setImportSummary(summary);
     setBatchFilter(null);
     setAlert(null);
@@ -205,8 +200,8 @@ export default function Dashboard() {
       if (err instanceof CsvMappingRequiredError) {
         setMappingRequest({
           file,
-          headers: err.headers as string[],
-          sampleRows: err.sampleRows as Array<Record<string, unknown>>,
+          headers: err.headers,
+          sampleRows: err.sampleRows,
         });
       } else {
         console.error(err);
@@ -369,10 +364,10 @@ export default function Dashboard() {
 
   // ── Bulk actions ───────────────────────────────────────────────────────────
 
-  const runBulk = async (action: () => Promise<string>, fallbackError: string) => {
+  const runBulk = async (action: (db: DbApi) => Promise<string>, fallbackError: string) => {
     if (!db) return false;
     try {
-      const message = await action();
+      const message = await action(db);
       markMutation();
       setAlert({ type: 'success', message });
       return true;
@@ -398,34 +393,34 @@ export default function Dashboard() {
           setAlert({ type: 'error', message: 'Only split halves are selected. Undo the split before changing their category.' });
           return;
         }
-        await runBulk(async () => {
+        await runBulk(async (db) => {
           await bulkSetCategory(db, editable.map((tx) => tx.id), category);
           const skipped = rows.length - editable.length;
           return `Set ${plural(editable.length)} to "${category}".${skipped ? ` Skipped ${skipped} split half${skipped === 1 ? '' : 's'}.` : ''}`;
         }, 'Failed to set the category.');
       }}
       onSetOverride={async (rows, status) => {
-        await runBulk(async () => {
+        await runBulk(async (db) => {
           await bulkSetOverride(db, rows.map((tx) => tx.id), status);
           const verb = status === 1 ? 'Excluded' : status === 0 ? 'Included' : 'Reset to automatic';
           return `${verb}: ${plural(rows.length)}.`;
         }, 'Failed to update analytics inclusion.');
       }}
       onAddTag={async (rows, tag) => {
-        await runBulk(async () => {
+        await runBulk(async (db) => {
           await addTagToTransactions(db, rows.map((tx) => tx.id), tag);
           return `Tagged ${plural(rows.length)}.`;
         }, 'Failed to add the tag.');
       }}
       onRemoveTag={async (rows, tag) => {
-        await runBulk(async () => {
+        await runBulk(async (db) => {
           await removeTagFromTransactions(db, rows.map((tx) => tx.id), tag);
           return `Removed #${tag} from the selection.`;
         }, 'Failed to remove the tag.');
       }}
       onDelete={async (rows) => {
         if (!window.confirm(`Delete ${plural(rows.length)}?\n\nThis action cannot be undone.`)) return;
-        const ok = await runBulk(async () => {
+        const ok = await runBulk(async (db) => {
           await bulkDelete(db, rows.map((tx) => tx.id));
           return `Deleted ${plural(rows.length)}.`;
         }, 'Failed to delete the selection.');

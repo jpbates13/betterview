@@ -3,11 +3,11 @@ import { FileSpreadsheet, Trash2 } from 'lucide-react';
 import { deleteCsvProfile, getCsvProfiles } from '../../csvImporter.js';
 import { Empty, ErrorNote, Loading, Section } from '../planning/ui';
 import { dangerIconButtonClass, errorMessage, useDbData, useMutation } from '../planning/shared';
-import type { Db } from '../planning/shared';
+import type { CsvProfile, DbApi } from '../../types';
 
-type Profile = { id: number; name: string; headers?: string[] };
+type Profile = CsvProfile & { id: number };
 
-const loadProfiles = (db: Db) => getCsvProfiles(db) as Promise<Profile[]>;
+const loadProfiles = (db: DbApi) => getCsvProfiles(db);
 
 export default function CsvProfilesSection() {
   const { data: profiles, isLoading, error: loadError } = useDbData(loadProfiles, [] as Profile[]);

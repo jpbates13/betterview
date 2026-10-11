@@ -3,23 +3,7 @@ import { ArrowUpRight, Repeat } from 'lucide-react';
 import { detectRecurringCharges } from '../../db/features.js';
 import { Empty, ErrorNote, Kpi, Loading, Section } from './ui';
 import { money, todayIso, useDbData } from './shared';
-import type { Db } from './shared';
-
-type Recurring = {
-  merchant: string;
-  category: string;
-  cadence: string;
-  occurrences: number;
-  typicalAmount: number;
-  lastAmount: number;
-  previousAmount: number;
-  priceChange: number;
-  firstDate: string;
-  lastDate: string;
-  nextExpected: string;
-  isStopped: boolean;
-  yearlyCost: number;
-};
+import type { DbApi, RecurringCharge } from '../../types';
 
 const formatDate = (iso: string) => {
   const [y, m, d] = iso.split('-').map(Number);
@@ -28,8 +12,8 @@ const formatDate = (iso: string) => {
 
 export default function RecurringSection() {
   const today = todayIso();
-  const load = useCallback((db: Db) => detectRecurringCharges(db, { today }) as Promise<Recurring[]>, [today]);
-  const { data: charges, isLoading, error } = useDbData(load, [] as Recurring[]);
+  const load = useCallback((db: DbApi) => detectRecurringCharges(db, { today }), [today]);
+  const { data: charges, isLoading, error } = useDbData(load, [] as RecurringCharge[]);
   const [showStopped, setShowStopped] = useState(false);
 
   const active = charges.filter((c) => !c.isStopped);

@@ -3,20 +3,11 @@ import { CalendarRange, Download } from 'lucide-react';
 import { getTagSummary, getYearSummary, transactionsToCsv } from '../../db/features.js';
 import { getTransactions } from '../../dbQueries.js';
 import { Empty, ErrorNote, Kpi, Loading, Section } from '../planning/ui';
-import { downloadFile, errorMessage, inputClass, money, moneyWhole, percent, primaryButtonClass, todayIso, useDb, useDbData } from '../planning/shared';
-import type { Db } from '../planning/shared';
+import { downloadFile, errorMessage, inputClass, money, moneyWhole, percent, primaryButtonClass, todayIso, useDbData } from '../planning/shared';
+import { useDatabase } from '../../useDatabase';
+import type { DbApi, TagSummary, YearSummary } from '../../types';
 
-type Summary = {
-  year: number;
-  income: number;
-  grossExpenses: number;
-  netSpent: number;
-  savingsRate: number | null;
-  categories: { category: string; spent: number }[];
-  topMerchants: { merchant: string; count: number; spent: number }[];
-};
-type Tag = { tag: string; count: number; total: number };
-type Data = { summary: Summary | null; tags: Tag[]; years: number[] };
+type Data = { summary: YearSummary | null; tags: TagSummary[]; years: number[] };
 
 const SUGGESTED_TAGS = ['tax-deductible', 'charitable', 'medical'];
 
@@ -27,19 +18,19 @@ export default function YearReviewSection() {
   const [exportError, setExportError] = useState('');
   const [isExporting, setIsExporting] = useState(false);
 
-  const load = useCallback(async (db: Db): Promise<Data> => {
+  const load = useCallback(async (db: DbApi): Promise<Data> => {
     const [summary, tags, yearRows] = await Promise.all([
       getYearSummary(db, year),
       getTagSummary(db, { startDate: `${year}-01-01`, endDate: `${year}-12-31` }),
       db.exec("SELECT DISTINCT CAST(strftime('%Y', date) AS INTEGER) FROM transactions WHERE is_hidden = 0 AND date IS NOT NULL ORDER BY 1 DESC;"),
     ]);
-    const years = ((yearRows[0] as { values?: unknown[][] } | undefined)?.values ?? [])
+    const years = (yearRows[0]?.values ?? [])
       .map((row) => Number(row[0]))
       .filter((y) => Number.isFinite(y) && y > 1900);
-    return { summary: summary as Summary, tags: tags as Tag[], years };
+    return { summary, tags, years };
   }, [year]);
   const { data, isLoading, error } = useDbData(load, { summary: null, tags: [], years: [] } as Data);
-  const { db } = useDb();
+  const { db } = useDatabase();
 
   const handleExport = async () => {
     if (!db) return;
@@ -47,7 +38,7 @@ export default function YearReviewSection() {
     setExportError('');
     try {
       const filters = { startDate: `${year}-01-01`, endDate: `${year}-12-31`, tag: tag || undefined };
-      const rows = await getTransactions(db, filters as unknown as Parameters<typeof getTransactions>[1]);
+      const rows = await getTransactions(db, filters);
       if (rows.length === 0) {
         setExportError(`No ${tag ? `transactions tagged ${tag}` : 'transactions'} in ${year} to export.`);
         return;

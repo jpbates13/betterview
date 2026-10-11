@@ -17,18 +17,7 @@ import {
   useDbData,
   useMutation,
 } from './shared';
-import type { Db } from './shared';
-
-type BudgetRow = {
-  category: string;
-  monthly_amount: number;
-  spent: number;
-  remaining: number;
-  percent: number;
-  expectedByToday: number;
-  isOver: boolean;
-  isAheadOfPace: boolean;
-};
+import type { BudgetProgress, DbApi } from '../../types';
 
 const shiftMonth = (month: string, delta: number) => {
   const [y, m] = month.split('-').map(Number);
@@ -36,7 +25,7 @@ const shiftMonth = (month: string, delta: number) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-function BudgetBar({ row }: { row: BudgetRow }) {
+function BudgetBar({ row }: { row: BudgetProgress }) {
   const fill = Math.min(row.percent, 1) * 100;
   const pace = row.monthly_amount > 0 ? Math.min(row.expectedByToday / row.monthly_amount, 1) * 100 : 0;
   const color = row.isOver ? 'bg-red-500' : row.isAheadOfPace ? 'bg-amber-500' : 'bg-emerald-500';
@@ -54,11 +43,11 @@ export default function BudgetsSection() {
   const today = todayIso();
   const [month, setMonth] = useState(today.slice(0, 7));
   const loadProgress = useCallback(
-    (db: Db) => getBudgetProgress(db, month, today) as Promise<BudgetRow[]>,
+    (db: DbApi) => getBudgetProgress(db, month, today),
     [month, today],
   );
-  const { data: rows, isLoading, error: loadError } = useDbData(loadProgress, [] as BudgetRow[]);
-  const { data: categories } = useDbData(getCategoryNames as (db: Db) => Promise<string[]>, [] as string[]);
+  const { data: rows, isLoading, error: loadError } = useDbData(loadProgress, [] as BudgetProgress[]);
+  const { data: categories } = useDbData(getCategoryNames, [] as string[]);
   const mutate = useMutation();
 
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -68,7 +57,7 @@ export default function BudgetsSection() {
   const [error, setError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
-  const openForm = (row?: BudgetRow) => {
+  const openForm = (row?: BudgetProgress) => {
     setEditing(row?.category ?? null);
     setCategory(row?.category ?? '');
     setAmount(row ? String(row.monthly_amount) : '');
@@ -96,7 +85,7 @@ export default function BudgetsSection() {
     }
   };
 
-  const handleDelete = async (row: BudgetRow) => {
+  const handleDelete = async (row: BudgetProgress) => {
     if (!window.confirm(`Delete the ${row.category} budget?`)) return;
     try {
       await mutate((db) => deleteBudget(db, row.category));

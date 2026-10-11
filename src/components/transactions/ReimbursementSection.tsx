@@ -1,16 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link2, Unlink, HandCoins } from 'lucide-react';
-import { useDatabase } from '../../DatabaseContext.jsx';
-import { getLinkedReimbursements, getReimbursementStatus, linkReimbursement } from '../../db/features.js';
-import { getTransactions, getUnlinkedCredits } from './api';
-import { errorMessage, type DatabaseContextValue, type Transaction } from './types';
-
-interface CreditRow {
-  id: number;
-  date: string;
-  description: string;
-  amount: number;
-}
+import { useDatabase } from '../../useDatabase';
+import { getLinkedReimbursements, getReimbursementStatus, getUnlinkedCredits, linkReimbursement } from '../../db/features.js';
+import { getTransactions } from '../../dbQueries.js';
+import { errorMessage } from '../planning/shared';
+import type { CreditRow, Transaction } from '../../types';
 
 interface ReimbursementSectionProps {
   transaction: Transaction;
@@ -19,7 +13,7 @@ interface ReimbursementSectionProps {
 const money = (n: number) => `$${Math.abs(n).toFixed(2)}`;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-const toCredit = (row: Record<string, unknown>): CreditRow => ({
+const toCredit = (row: CreditRow): CreditRow => ({
   id: Number(row.id),
   date: String(row.date ?? ''),
   description: String(row.description ?? ''),
@@ -31,7 +25,7 @@ const toCredit = (row: Record<string, unknown>): CreditRow => ({
  * it back and what's still owed; for a credit, the expense it pays back.
  */
 export default function ReimbursementSection({ transaction }: ReimbursementSectionProps) {
-  const { db, notifyDataChanged, triggerMutation } = useDatabase() as DatabaseContextValue;
+  const { db, notifyDataChanged, triggerMutation } = useDatabase();
   const isExpense = transaction.amount < 0;
 
   const [linked, setLinked] = useState<CreditRow[]>([]);
@@ -57,9 +51,9 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
             getReimbursementStatus(db),
           ]);
           if (cancelled) return;
-          setLinked((linkedRows as Record<string, unknown>[]).map(toCredit));
-          setCandidates((candidateRows as Record<string, unknown>[]).map(toCredit));
-          const status = (statusRows as Array<{ id: number; outstanding: number }>).find((row) => Number(row.id) === transaction.id);
+          setLinked(linkedRows.map(toCredit));
+          setCandidates(candidateRows.map(toCredit));
+          const status = statusRows.find((row) => Number(row.id) === transaction.id);
           setTrackedOutstanding(status ? Number(status.outstanding) : null);
         } else if (reimbursesId) {
           const rows = await getTransactions(db, { ids: [reimbursesId] });

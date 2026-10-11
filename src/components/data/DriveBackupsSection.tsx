@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { History, Lock, LockOpen, RotateCcw } from 'lucide-react';
-import { useDriveSync } from '../../DriveSyncContext.jsx';
-import { useDatabase } from '../../DatabaseContext.jsx';
+import { useDriveSync } from '../../useDriveSync';
+import { useDatabase } from '../../useDatabase';
 import { downloadDriveBackup, listDriveBackups } from '../../DriveSyncEngine.js';
 import { clearEncryptionKey, enableEncryption, loadEncryptionKey } from '../../driveCrypto.js';
-
-type Backup = { id: string, name: string, modifiedTime?: string, size?: string };
+import type { DriveFile } from '../../types';
 
 const backupDate = (name: string) => name.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? name;
 
 // Drive's dated daily copies (restorable) and the optional encryption of the Drive copy.
 export default function DriveBackupsSection() {
-  const { accessToken } = useDriveSync() as any;
-  const { loadDatabaseFile, triggerMutation, notifyDataChanged } = useDatabase() as any;
-  const [backups, setBackups] = useState<Backup[] | null>(null);
+  const { accessToken } = useDriveSync();
+  const { loadDatabaseFile, triggerMutation, notifyDataChanged } = useDatabase();
+  const [backups, setBackups] = useState<DriveFile[] | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -36,7 +35,7 @@ export default function DriveBackupsSection() {
     refresh();
   }, [refresh]);
 
-  const restore = async (backup: Backup) => {
+  const restore = async (backup: DriveFile) => {
     const date = backupDate(backup.name);
     if (!window.confirm(`Replace all current data with the Drive backup from ${date}? Download a backup first if you might want today's data back.`)) return;
     setBusy(backup.id);

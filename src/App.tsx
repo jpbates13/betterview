@@ -7,8 +7,8 @@ import Analytics from './pages/Analytics';
 import RulesDashboard from './pages/RulesDashboard.jsx';
 import Planning from './pages/Planning';
 import DataSettings from './pages/DataSettings';
-import { useDriveSync } from './DriveSyncContext.jsx';
-import { useDatabase } from './DatabaseContext.jsx';
+import { useDriveSync } from './useDriveSync';
+import { useDatabase } from './useDatabase';
 import { downloadDbFromDrive, getDriveUserId } from './DriveSyncEngine.js';
 import { PassphraseRequiredError, unlockWithPassphrase } from './driveCrypto.js';
 import PassphrasePrompt from './components/PassphrasePrompt';
@@ -18,10 +18,10 @@ import {
   saveDbBytesToBrowser,
   saveDbOwnerToBrowser,
 } from './dbStorage.js';
-import { AutoSyncContext, clearPendingSync, hasPendingSync, useAutoSync } from './useAutoSync.js';
+import { AutoSyncContext, clearPendingSync, hasPendingSync, useAutoSync } from './useAutoSync';
 
 function DashboardApp() {
-  const { accessToken, tokenExpiresAt, clearAccessToken } = useDriveSync() as any;
+  const { accessToken, tokenExpiresAt, clearAccessToken } = useDriveSync();
   const {
     db,
     isReady,
@@ -30,7 +30,7 @@ function DashboardApp() {
     triggerMutation,
     createEmptyDatabase,
     reloadDatabaseFromBrowser,
-  } = useDatabase() as any;
+  } = useDatabase();
   // An encrypted Drive copy this device can't open yet; shows the passphrase screen.
   const [lockedCloud, setLockedCloud] = useState<{ bytes: Uint8Array, message: string } | null>(null);
 

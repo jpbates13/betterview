@@ -5,9 +5,9 @@ import {
 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import { useGoogleLogin } from '@react-oauth/google';
-import { useAutoSyncStatus } from '../useAutoSync.js';
-import { useDriveSync } from '../DriveSyncContext.jsx';
-import { useDatabase } from '../DatabaseContext.jsx';
+import { useAutoSyncStatus } from '../useAutoSync';
+import { useDriveSync } from '../useDriveSync';
+import { useDatabase } from '../useDatabase';
 import { downloadBytes } from '../download.js';
 
 const navItems = [
@@ -19,7 +19,7 @@ const navItems = [
 ];
 
 function SyncIndicator() {
-  const { syncStatus, syncError, retrySync } = useAutoSyncStatus() as any;
+  const { syncStatus, syncError, retrySync } = useAutoSyncStatus();
 
   if (syncStatus === 'error') {
     return (
@@ -49,9 +49,9 @@ function SyncIndicator() {
 }
 
 function Banners() {
-  const { syncStatus, syncError, resolveConflict } = useAutoSyncStatus() as any;
-  const { tokenExpiresAt, setTokenFromGoogleResponse } = useDriveSync() as any;
-  const { exportDatabase } = useDatabase() as any;
+  const { syncStatus, syncError, resolveConflict } = useAutoSyncStatus();
+  const { tokenExpiresAt, setTokenFromGoogleResponse } = useDriveSync();
+  const { exportDatabase } = useDatabase();
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -112,7 +112,7 @@ function Banners() {
 
 export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
-  const { logout } = useAutoSyncStatus() as any;
+  const { logout } = useAutoSyncStatus();
 
   return (
     <div className="min-h-screen bg-gray-50 flex">

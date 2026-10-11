@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Pencil, Play, Plus, Sparkles, Trash2, X } from 'lucide-react';
 import { bootstrapSchema, previewRule } from '../dbQueries.js';
-import { useDatabase } from '../DatabaseContext.jsx';
+import { useDatabase } from '../useDatabase';
 import RulePreviewPanel from '../components/rules/RulePreviewPanel.jsx';
 import RunRuleDialog from '../components/rules/RunRuleDialog.jsx';
 import { useRulePreview } from '../components/rules/useRulePreview.js';

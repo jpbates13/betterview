@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { X, Table2 } from 'lucide-react';
 import { DATE_FORMATS, guessProfile, validateProfile } from '../../csvImporter.js';
-import type { CsvProfile } from './types';
+import type { CsvProfile } from '../../types';
 
 interface CsvMappingModalProps {
   fileName: string;
@@ -19,12 +19,12 @@ const inputClass =
 
 export default function CsvMappingModal({ fileName, headers, sampleRows, onCancel, onConfirm }: CsvMappingModalProps) {
   const [profile, setProfile] = useState<CsvProfile>(() => {
-    const guess = guessProfile(headers) as CsvProfile;
+    const guess = guessProfile(headers);
     // Prefer a single amount column when one was found; otherwise fall back to debit/credit.
     return guess.amount ? { ...guess, debit: null, credit: null } : guess;
   });
   const [amountMode, setAmountMode] = useState<'single' | 'split'>(() => {
-    const guess = guessProfile(headers) as CsvProfile;
+    const guess = guessProfile(headers);
     return !guess.amount && (guess.debit || guess.credit) ? 'split' : 'single';
   });
   const [saveFormat, setSaveFormat] = useState(true);

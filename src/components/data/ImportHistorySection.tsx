@@ -3,19 +3,9 @@ import { History, Undo2 } from 'lucide-react';
 import { getImportBatches, undoImportBatch } from '../../csvImporter.js';
 import { Empty, ErrorNote, Loading, Section, SuccessNote } from '../planning/ui';
 import { errorMessage, secondaryButtonClass, useDbData, useMutation } from '../planning/shared';
-import type { Db } from '../planning/shared';
+import type { DbApi, ImportBatch } from '../../types';
 
-type Batch = {
-  id: number | string;
-  file_name: string;
-  profile_name: string | null;
-  imported_at: string;
-  inserted_count: number;
-  duplicate_count: number;
-  visible_rows: number;
-};
-
-const loadBatches = (db: Db) => getImportBatches(db) as Promise<Batch[]>;
+const loadBatches = (db: DbApi) => getImportBatches(db);
 
 const formatWhen = (value: string) => {
   const parsed = new Date(value);
@@ -25,13 +15,13 @@ const formatWhen = (value: string) => {
 };
 
 export default function ImportHistorySection() {
-  const { data: batches, isLoading, error: loadError } = useDbData(loadBatches, [] as Batch[]);
+  const { data: batches, isLoading, error: loadError } = useDbData(loadBatches, [] as ImportBatch[]);
   const mutate = useMutation();
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [undoing, setUndoing] = useState<Batch['id'] | null>(null);
+  const [undoing, setUndoing] = useState<ImportBatch['id'] | null>(null);
 
-  const handleUndo = async (batch: Batch) => {
+  const handleUndo = async (batch: ImportBatch) => {
     const confirmed = window.confirm(
       `Undo the import of ${batch.file_name}?\n\nThis deletes the ${batch.inserted_count} transactions it added, including any edits, tags or splits made to them since.`,
     );

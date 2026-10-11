@@ -2,7 +2,8 @@ import { useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { DatabaseBackup, Download, Upload } from 'lucide-react';
 import { ErrorNote, Section, SuccessNote } from '../planning/ui';
-import { downloadFile, errorMessage, primaryButtonClass, secondaryButtonClass, todayIso, useDb } from '../planning/shared';
+import { downloadFile, errorMessage, primaryButtonClass, secondaryButtonClass, todayIso } from '../planning/shared';
+import { useDatabase } from '../../useDatabase';
 
 const SQLITE_HEADER = 'SQLite format 3\0';
 
@@ -13,7 +14,7 @@ const isSqliteFile = async (file: File) => {
 };
 
 export default function BackupSection() {
-  const { exportDatabase, loadDatabaseFile, triggerMutation, notifyDataChanged } = useDb();
+  const { exportDatabase, loadDatabaseFile, triggerMutation, notifyDataChanged } = useDatabase();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<'download' | 'restore' | null>(null);
   const [error, setError] = useState('');

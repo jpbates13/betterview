@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { X, Tag, Wand2 } from 'lucide-react';
-import { useDatabase } from '../DatabaseContext.jsx';
+import { useDatabase } from '../useDatabase';
 import { normalizeTag, setTransactionTags, REIMBURSABLE_TAG } from '../db/features.js';
 import ReimbursementSection from './transactions/ReimbursementSection';
-import { errorMessage, type DatabaseContextValue, type Transaction } from './transactions/types';
+import { errorMessage } from './planning/shared';
+import type { Transaction } from '../types';
 
-interface TransactionFormData {
+export interface TransactionFormData {
   date: string;
   description: string;
   amount: number;
@@ -47,7 +48,7 @@ export default function TransactionModal(props: TransactionModalProps) {
 }
 
 function TransactionForm({ onClose, mode, initialData, onSubmit, categories = [] }: TransactionModalProps) {
-  const { db, notifyDataChanged, triggerMutation } = useDatabase() as DatabaseContextValue;
+  const { db, notifyDataChanged, triggerMutation } = useDatabase();
   const editing = mode === 'edit' && initialData ? initialData : null;
 
   const [formData, setFormData] = useState<TransactionFormData>(() => (editing

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Eye, EyeOff, RotateCcw, Tag, Tags, Trash2, Wand2, X, FolderInput } from 'lucide-react';
-import type { Transaction } from './types';
+import type { Transaction } from '../../types';
 
 export interface BulkActionHandlers {
   onSetCategory: (rows: Transaction[], category: string) => Promise<void>;

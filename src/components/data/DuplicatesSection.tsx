@@ -4,16 +4,10 @@ import { getPossibleDuplicates } from '../../db/features.js';
 import { deleteTransaction } from '../../dbQueries.js';
 import { Empty, ErrorNote, Loading, Section } from '../planning/ui';
 import { errorMessage, money, secondaryButtonClass, useDbData, useMutation } from '../planning/shared';
-import type { Db } from '../planning/shared';
-
-type Pair = {
-  a_id: number; a_date: string; a_description: string; a_source: string | null;
-  b_id: number; b_date: string; b_description: string; b_source: string | null;
-  amount: number; account: string;
-};
+import type { DbApi, DuplicatePair } from '../../types';
 
 const DISMISSED_KEY = 'betterview.duplicates.dismissed.v1';
-const pairKey = (pair: Pair) => `${pair.a_id}-${pair.b_id}`;
+const pairKey = (pair: DuplicatePair) => `${pair.a_id}-${pair.b_id}`;
 
 const readDismissed = (): string[] => {
   try {
@@ -24,7 +18,7 @@ const readDismissed = (): string[] => {
   }
 };
 
-const loadPairs = (db: Db) => getPossibleDuplicates(db) as Promise<Pair[]>;
+const loadPairs = (db: DbApi) => getPossibleDuplicates(db);
 
 function Copy({ date, description, source }: { date: string; description: string; source: string | null }) {
   return (
@@ -36,13 +30,13 @@ function Copy({ date, description, source }: { date: string; description: string
 }
 
 export default function DuplicatesSection() {
-  const { data: pairs, isLoading, error: loadError } = useDbData(loadPairs, [] as Pair[]);
+  const { data: pairs, isLoading, error: loadError } = useDbData(loadPairs, [] as DuplicatePair[]);
   const mutate = useMutation();
   const [dismissed, setDismissed] = useState<string[]>(readDismissed);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
 
-  const dismiss = (pair: Pair) => {
+  const dismiss = (pair: DuplicatePair) => {
     const next = [...new Set([...dismissed, pairKey(pair)])];
     setDismissed(next);
     try {
@@ -52,7 +46,7 @@ export default function DuplicatesSection() {
     }
   };
 
-  const removeCopy = async (pair: Pair, which: 'a' | 'b') => {
+  const removeCopy = async (pair: DuplicatePair, which: 'a' | 'b') => {
     const id = which === 'a' ? pair.a_id : pair.b_id;
     const description = which === 'a' ? pair.a_description : pair.b_description;
     const date = which === 'a' ? pair.a_date : pair.b_date;

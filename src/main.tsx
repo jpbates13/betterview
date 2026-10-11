@@ -3,8 +3,8 @@ import { createRoot } from 'react-dom/client'
 import { GoogleOAuthProvider } from '@react-oauth/google'
 import './index.css'
 import App from './App.tsx'
-import { DatabaseProvider } from './DatabaseContext.jsx'
-import { DriveSyncProvider } from './DriveSyncContext.jsx'
+import { DatabaseProvider } from './DatabaseContext'
+import { DriveSyncProvider } from './DriveSyncContext'
 
 const googleOAuthClientId = import.meta.env.VITE_GOOGLE_OAUTH_CLIENT_ID
 

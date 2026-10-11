@@ -1,8 +1,8 @@
 import { useState, useMemo, useDeferredValue } from 'react';
 import { ChevronLeft, ChevronRight, FileDigit, ArrowUpDown, ChevronUp, ChevronDown, Edit2, Search, Trash2, Scissors, FilterX, Undo2, Tag } from 'lucide-react';
-import type { Transaction } from './transactions/types';
+import type { Transaction } from '../types';
 
-export type { Transaction } from './transactions/types';
+export type { Transaction } from '../types';
 
 type SortField = 'date' | 'description' | 'category' | 'status' | 'account' | 'amount';
 type SortDirection = 'asc' | 'desc';

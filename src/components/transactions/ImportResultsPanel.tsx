@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { CheckCircle, Filter, Undo2, X, ChevronDown, ChevronUp } from 'lucide-react';
-import type { ImportSummary } from './types';
+import type { ImportSummary } from '../../types';
 
 interface ImportResultsPanelProps {
   summary: ImportSummary;
