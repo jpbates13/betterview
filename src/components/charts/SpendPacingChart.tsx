@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { useMemo, useState } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, type LegendPayload } from 'recharts';
 import { format, parseISO } from 'date-fns';
 
-type SpikeTransaction = {
+export type SpikeTransaction = {
     id: number;
     date: string;
     description: string;
@@ -12,10 +12,10 @@ type SpikeTransaction = {
     spend_impact: number;
 };
 
-type PacingData = {
+export type PacingData = {
     day: number;
-    current_date?: string;
-    previous_date?: string;
+    current_date?: string | null;
+    previous_date?: string | null;
     current_day_spend?: number;
     previous_day_spend?: number;
     current_day_income?: number;
@@ -32,7 +32,7 @@ type PacingData = {
     previous_income?: number;
 };
 
-const formatIsoDate = (isoDate?: string) => {
+const formatIsoDate = (isoDate?: string | null) => {
     if (!isoDate) return '';
     try {
         return format(parseISO(isoDate), 'MMM d, yyyy');
@@ -92,15 +92,28 @@ const getSpikeDays = (
     return new Set(candidates.map(candidate => candidate.day));
 };
 
-const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSpikeMarkers = false, comparisonMode = 'previous-period', paceMode = 'expense' }: any) => {
+type PacingTooltipProps = {
+    active?: boolean;
+    payload?: ReadonlyArray<{ payload: PacingData }>;
+    label?: string | number;
+    hiddenBars?: Record<string, boolean>;
+    filter: string;
+    showSpikeMarkers?: boolean;
+    comparisonMode?: 'previous-period' | 'previous-year';
+    paceMode?: 'expense' | 'income';
+};
+
+const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSpikeMarkers = false, comparisonMode = 'previous-period', paceMode = 'expense' }: PacingTooltipProps) => {
     if (active && payload && payload.length) {
         const data = payload[0].payload;
         const isModeExpense = paceMode === 'expense';
+        const currentValue = isModeExpense ? data.current_spend : data.current_income;
+        const previousValue = isModeExpense ? data.previous_spend : data.previous_income;
         return (
             <div className="bg-white rounded-lg shadow-md p-4 border border-gray-100 z-50">
                 <p className="font-medium text-gray-900 mb-3">{filter === 'All Time' ? '' : `Day ${label}`}</p>
                 <div className="space-y-2">
-                    {!hiddenBars.current_spend && (isModeExpense ? data.current_spend : data.current_income) !== undefined && (
+                    {!hiddenBars.current_spend && currentValue !== undefined && (
                         <div className="flex items-start gap-4 justify-between w-full min-w-[200px]">
                             <div className="flex flex-col">
                                 <div className="flex items-center gap-2">
@@ -110,16 +123,16 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSp
                                 {data.current_date && <span className="text-xs text-gray-500 ml-5">{formatIsoDate(data.current_date)}</span>}
                             </div>
                             <span className="font-bold text-gray-900 mt-0.5">
-                                ${(isModeExpense ? data.current_spend : data.current_income).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ${currentValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
                         </div>
                     )}
 
-                    {!hiddenBars.current_spend && !hiddenBars.previous_spend && (isModeExpense ? data.current_spend : data.current_income) !== undefined && (isModeExpense ? data.previous_spend : data.previous_income) !== undefined && (
+                    {!hiddenBars.current_spend && !hiddenBars.previous_spend && currentValue !== undefined && previousValue !== undefined && (
                         <div className="border-t border-gray-100 my-2" />
                     )}
 
-                    {!hiddenBars.previous_spend && (isModeExpense ? data.previous_spend : data.previous_income) !== undefined && (
+                    {!hiddenBars.previous_spend && previousValue !== undefined && (
                         <div className="flex items-start gap-4 justify-between w-full min-w-[200px]">
                             <div className="flex flex-col">
                                 <div className="flex items-center gap-2">
@@ -129,7 +142,7 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSp
                                 {data.previous_date && <span className="text-xs text-gray-500 ml-5">{formatIsoDate(data.previous_date)}</span>}
                             </div>
                             <span className="font-bold text-gray-900 mt-0.5">
-                                ${(isModeExpense ? data.previous_spend : data.previous_income).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ${previousValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
                         </div>
                     )}
@@ -165,7 +178,10 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSp
 };
 
 export default function SpendPacingChart({ data, filter, showSpikeMarkers = false, comparisonMode = 'previous-period' }: { data: PacingData[], filter: string, showSpikeMarkers?: boolean, comparisonMode?: 'previous-period' | 'previous-year' }) {
-    const [hiddenBars, setHiddenBars] = useState<Record<string, boolean>>({});
+    // Hidden series reset whenever the filter or the data range changes.
+    const resetKey = `${filter}|${data.length}`;
+    const [hiddenState, setHiddenState] = useState<{ key: string, bars: Record<string, boolean> }>({ key: resetKey, bars: {} });
+    const hiddenBars = hiddenState.key === resetKey ? hiddenState.bars : {};
     const [paceMode, setPaceMode] = useState<'expense' | 'income'>('expense');
     const currentSpikeDays = useMemo(
         () => (showSpikeMarkers && paceMode === 'expense' ? getSpikeDays(data, 'current_day_spend', 'current_top_transaction') : new Set<number>()),
@@ -193,16 +209,12 @@ export default function SpendPacingChart({ data, filter, showSpikeMarkers = fals
     );
     const maxDay = data.length > 0 ? data[data.length - 1].day : 1;
 
-    useEffect(() => {
-        setHiddenBars({});
-    }, [filter, data.length]);
-
-    const handleLegendClick = (e: any) => {
-        const dataKey = e.dataKey;
-        setHiddenBars(prev => ({
-            ...prev,
-            [dataKey]: !prev[dataKey]
-        }));
+    const handleLegendClick = (e: LegendPayload) => {
+        const dataKey = String(e.dataKey);
+        setHiddenState(prev => {
+            const bars = prev.key === resetKey ? prev.bars : {};
+            return { key: resetKey, bars: { ...bars, [dataKey]: !bars[dataKey] } };
+        });
     };
 
     const currentDataKey = paceMode === 'income' ? 'current_income' : 'current_spend';

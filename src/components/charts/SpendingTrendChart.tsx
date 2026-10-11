@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, type LegendPayload } from 'recharts';
 
 type TrendData = {
   month: string; // YYYY-MM
@@ -9,7 +9,14 @@ type TrendData = {
   net_expenses: number;
 };
 
-const CustomTooltip = ({ active, payload, label, hiddenBars = {} }: any) => {
+type TrendTooltipProps = {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload: TrendData }>;
+  label?: string | number;
+  hiddenBars?: Record<string, boolean>;
+};
+
+const CustomTooltip = ({ active, payload, label, hiddenBars = {} }: TrendTooltipProps) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     return (
@@ -73,8 +80,8 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {} }: any) => {
 export default function SpendingTrendChart({ data, onBarClick }: { data: TrendData[], onBarClick?: (month: string) => void }) {
   const [hiddenBars, setHiddenBars] = useState<Record<string, boolean>>({});
 
-  const handleLegendClick = (e: any) => {
-    const dataKey = e.dataKey;
+  const handleLegendClick = (e: LegendPayload) => {
+    const dataKey = String(e.dataKey);
     setHiddenBars(prev => ({
       ...prev,
       [dataKey]: !prev[dataKey]
@@ -119,9 +126,9 @@ export default function SpendingTrendChart({ data, onBarClick }: { data: TrendDa
           onClick={handleLegendClick}
           cursor="pointer"
         />
-        <Bar dataKey="total_income" name="Income" hide={hiddenBars.total_income} fill="#10B981" radius={[4, 4, 0, 0]} barSize={28} onClick={(data: any) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
-        <Bar dataKey="net_expenses" name="Net Expenses" hide={hiddenBars.net_expenses} stackId="expenses" fill="#64748B" barSize={28} onClick={(data: any) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
-        <Bar dataKey="reimbursed_amount" name="Reimbursements" hide={hiddenBars.reimbursed_amount} stackId="expenses" fill="#93C5FD" radius={[4, 4, 0, 0]} barSize={28} onClick={(data: any) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
+        <Bar dataKey="total_income" name="Income" hide={hiddenBars.total_income} fill="#10B981" radius={[4, 4, 0, 0]} barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
+        <Bar dataKey="net_expenses" name="Net Expenses" hide={hiddenBars.net_expenses} stackId="expenses" fill="#64748B" barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
+        <Bar dataKey="reimbursed_amount" name="Reimbursements" hide={hiddenBars.reimbursed_amount} stackId="expenses" fill="#93C5FD" radius={[4, 4, 0, 0]} barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
       </BarChart>
     </ResponsiveContainer>
   );

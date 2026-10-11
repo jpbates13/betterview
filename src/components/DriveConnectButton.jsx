@@ -1,6 +1,6 @@
 import { CheckCircle2 } from 'lucide-react';
 import { useGoogleLogin } from '@react-oauth/google';
-import { useDriveSync } from '../DriveSyncContext.jsx';
+import { useDriveSync } from '../useDriveSync';
 
 export default function DriveConnectButton() {
   const { accessToken, setTokenFromGoogleResponse } = useDriveSync();

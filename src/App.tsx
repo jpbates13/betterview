@@ -5,19 +5,23 @@ import LoginScreen from './components/LoginScreen.jsx';
 import Dashboard from './pages/Dashboard';
 import Analytics from './pages/Analytics';
 import RulesDashboard from './pages/RulesDashboard.jsx';
-import { useDriveSync } from './DriveSyncContext.jsx';
-import { useDatabase } from './DatabaseContext.jsx';
+import Planning from './pages/Planning';
+import DataSettings from './pages/DataSettings';
+import { useDriveSync } from './useDriveSync';
+import { useDatabase } from './useDatabase';
 import { downloadDbFromDrive, getDriveUserId } from './DriveSyncEngine.js';
+import { PassphraseRequiredError, unlockWithPassphrase } from './driveCrypto.js';
+import PassphrasePrompt from './components/PassphrasePrompt';
 import {
   clearDbFromBrowser,
   loadDbOwnerFromBrowser,
   saveDbBytesToBrowser,
   saveDbOwnerToBrowser,
 } from './dbStorage.js';
-import { AutoSyncContext, clearPendingSync, hasPendingSync, useAutoSync } from './useAutoSync.js';
+import { AutoSyncContext, clearPendingSync, hasPendingSync, useAutoSync } from './useAutoSync';
 
 function DashboardApp() {
-  const { accessToken, clearAccessToken } = useDriveSync() as any;
+  const { accessToken, tokenExpiresAt, clearAccessToken } = useDriveSync();
   const {
     db,
     isReady,
@@ -26,9 +30,31 @@ function DashboardApp() {
     triggerMutation,
     createEmptyDatabase,
     reloadDatabaseFromBrowser,
-  } = useDatabase() as any;
+  } = useDatabase();
+  // An encrypted Drive copy this device can't open yet; shows the passphrase screen.
+  const [lockedCloud, setLockedCloud] = useState<{ bytes: Uint8Array, message: string } | null>(null);
+
+  const replaceWithCloudCopy = useCallback(async () => {
+    try {
+      const cloudDb = await downloadDbFromDrive(accessToken);
+      if (!cloudDb) throw new Error('There is no Drive copy to load.');
+      await saveDbBytesToBrowser(cloudDb);
+      await reloadDatabaseFromBrowser();
+    } catch (error) {
+      if (error instanceof PassphraseRequiredError) {
+        setLockedCloud({ bytes: error.encryptedBytes, message: error.message });
+      }
+      throw error;
+    }
+  }, [accessToken, reloadDatabaseFromBrowser]);
+
   // Mounted here rather than on one page so edits made on any page get uploaded.
-  const { syncStatus, flushSync } = useAutoSync(lastMutationTime, accessToken, db);
+  const { syncStatus, syncError, flushSync, retrySync, resolveConflict } = useAutoSync(
+    lastMutationTime,
+    accessToken,
+    db,
+    { onTakeCloud: replaceWithCloudCopy },
+  );
   const [isHydratingCloudDb, setIsHydratingCloudDb] = useState(true);
   const [hydrationError, setHydrationError] = useState('');
   const [hydrationAttempt, setHydrationAttempt] = useState(0);
@@ -85,9 +111,14 @@ function DashboardApp() {
         if (!isSameOwner) clearPendingSync();
         await saveDbOwnerToBrowser(currentOwner);
       } catch (error) {
-        console.error('Failed to hydrate local DB from Drive after auth:', error);
         hydratedTokenRef.current = '';
-        setHydrationError('Could not reach Google Drive to load your database.');
+        if (error instanceof PassphraseRequiredError) {
+          setLockedCloud({ bytes: error.encryptedBytes, message: error.message });
+          return;
+        }
+        console.error('Failed to hydrate local DB from Drive after auth:', error);
+        const details = error instanceof Error ? ` (${error.message})` : '';
+        setHydrationError(`Could not reach Google Drive to load your database${details}.`);
       } finally {
         isHydrationInFlightRef.current = false;
         setIsHydratingCloudDb(false);
@@ -102,7 +133,35 @@ function DashboardApp() {
     clearAccessToken();
   }, [flushSync, clearAccessToken]);
 
-  const autoSyncValue = useMemo(() => ({ syncStatus, flushSync, logout }), [syncStatus, flushSync, logout]);
+  // Upload pending edits shortly before the Google token runs out.
+  useEffect(() => {
+    if (!tokenExpiresAt) return undefined;
+    const delay = tokenExpiresAt - Date.now() - 60_000;
+    if (delay <= 0) return undefined;
+    const timerId = window.setTimeout(() => { flushSync(); }, delay);
+    return () => window.clearTimeout(timerId);
+  }, [tokenExpiresAt, flushSync]);
+
+  const unlockCloudCopy = useCallback(async (passphrase: string) => {
+    if (!lockedCloud) return;
+    try {
+      // Stores the key on this device; then load the Drive copy the normal way.
+      await unlockWithPassphrase(lockedCloud.bytes, passphrase);
+      setLockedCloud(null);
+      setHydrationAttempt((prev) => prev + 1);
+    } catch (error) {
+      setLockedCloud({ ...lockedCloud, message: error instanceof Error ? error.message : String(error) });
+    }
+  }, [lockedCloud]);
+
+  const autoSyncValue = useMemo(
+    () => ({ syncStatus, syncError, flushSync, retrySync, resolveConflict, logout }),
+    [syncStatus, syncError, flushSync, retrySync, resolveConflict, logout],
+  );
+
+  if (lockedCloud) {
+    return <PassphrasePrompt message={lockedCloud.message} onSubmit={unlockCloudCopy} onLogout={clearAccessToken} />;
+  }
 
   if (hydrationError) {
     return (
@@ -149,6 +208,8 @@ function DashboardApp() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/rules" element={<RulesDashboard />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/planning" element={<Planning />} />
+          <Route path="/data" element={<DataSettings />} />
         </Routes>
       </Layout>
     </AutoSyncContext.Provider>

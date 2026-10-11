@@ -1,4 +1,6 @@
 import initSqlJs from 'sql.js';
+// Bundled from the installed package so the wasm always matches the sql.js version.
+import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 
 let SQL = null;
 let db = null;
@@ -13,7 +15,7 @@ const postError = (id, error) => {
 
 const ensureSql = async () => {
   if (!SQL) {
-    SQL = await initSqlJs({ locateFile: () => '/sql-wasm.wasm' });
+    SQL = await initSqlJs({ locateFile: () => sqlWasmUrl });
   }
 };
 
@@ -66,7 +68,8 @@ self.onmessage = async (event) => {
       if (!sql || typeof sql !== 'string') {
         throw new Error('Missing SQL statement.');
       }
-      const results = db.exec(sql);
+      const params = payload?.params;
+      const results = params ? db.exec(sql, params) : db.exec(sql);
       postSuccess(id, { results });
       return;
     }

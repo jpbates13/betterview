@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { loadDbFromBrowser, saveDbToBrowser } from './dbStorage.js';
 import {
   createRule as createRuleRecord,
@@ -9,12 +9,28 @@ import {
   updateAnalyticsSettingsConfig as updateAnalyticsSettingsConfigRecord,
   updateRule as updateRuleRecord,
 } from './dbQueries.js';
+import type { AnalyticsSettingsConfig, DbApi, QueryExecResult, RuleInput } from './types';
+import { DatabaseContext, type DatabaseContextValue } from './useDatabase';
 
-const DatabaseContext = createContext(null);
+type WorkerAction = 'init' | 'new' | 'load' | 'exec' | 'export';
 
-const createDbApi = (callWorker) => ({
-  exec: async (sql) => {
-    const response = await callWorker('exec', { sql });
+interface WorkerData {
+  ready?: boolean;
+  loaded?: boolean;
+  results?: QueryExecResult[];
+  bytes?: Uint8Array;
+}
+
+interface PendingRequest {
+  resolve: (data: WorkerData) => void;
+  reject: (error: Error) => void;
+}
+
+type CallWorker = (action: WorkerAction, payload?: Record<string, unknown>, transfer?: Transferable[]) => Promise<WorkerData>;
+
+const createDbApi = (callWorker: CallWorker): DbApi => ({
+  exec: async (sql, params) => {
+    const response = await callWorker('exec', params ? { sql, params } : { sql });
     return response.results || [];
   },
   export: async () => {
@@ -23,19 +39,19 @@ const createDbApi = (callWorker) => ({
   },
 });
 
-export function DatabaseProvider({ children }) {
-  const workerRef = useRef(null);
-  const pendingRef = useRef(new Map());
+export function DatabaseProvider({ children }: { children: ReactNode }) {
+  const workerRef = useRef<Worker | null>(null);
+  const pendingRef = useRef(new Map<string, PendingRequest>());
   const requestIdRef = useRef(0);
 
-  const [db, setDb] = useState(null);
+  const [db, setDb] = useState<DbApi | null>(null);
   const [dbName, setDbName] = useState('');
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState('');
   const [dataVersion, setDataVersion] = useState(0);
-  const [lastMutationTime, setLastMutationTime] = useState(null);
+  const [lastMutationTime, setLastMutationTime] = useState<number | null>(null);
 
-  const callWorker = useCallback((action, payload = {}, transfer = []) => {
+  const callWorker = useCallback<CallWorker>((action, payload = {}, transfer = []) => {
     return new Promise((resolve, reject) => {
       if (!workerRef.current) {
         reject(new Error('Database worker is not initialized.'));
@@ -51,13 +67,14 @@ export function DatabaseProvider({ children }) {
   useEffect(() => {
     const worker = new Worker(new URL('./workers/sqlWorker.js', import.meta.url), { type: 'module' });
     workerRef.current = worker;
+    const pendingRequests = pendingRef.current;
 
-    worker.onmessage = (event) => {
+    worker.onmessage = (event: MessageEvent<{ id: string; ok: boolean; data: WorkerData; error?: string }>) => {
       const { id, ok, data, error: workerError } = event.data || {};
-      const pending = pendingRef.current.get(id);
+      const pending = pendingRequests.get(id);
       if (!pending) return;
 
-      pendingRef.current.delete(id);
+      pendingRequests.delete(id);
       if (ok) {
         pending.resolve(data);
       } else {
@@ -76,19 +93,19 @@ export function DatabaseProvider({ children }) {
         setDbName(response?.loaded ? 'Browser-saved database' : 'In-memory database');
         setIsReady(true);
       } catch (initError) {
-        setError(initError.message || 'Failed to initialize SQL.js worker.');
+        setError((initError instanceof Error && initError.message) || 'Failed to initialize SQL.js worker.');
       }
     })();
 
     return () => {
-      pendingRef.current.forEach(({ reject }) => reject(new Error('Database worker terminated.')));
-      pendingRef.current.clear();
+      pendingRequests.forEach(({ reject }) => reject(new Error('Database worker terminated.')));
+      pendingRequests.clear();
       worker.terminate();
       workerRef.current = null;
     };
   }, [callWorker]);
 
-  const loadDatabaseFile = useCallback(async (file) => {
+  const loadDatabaseFile = useCallback(async (file: File | null | undefined) => {
     if (!file) return;
 
     setError('');
@@ -124,6 +141,8 @@ export function DatabaseProvider({ children }) {
     }
 
     await callWorker('load', { buffer: loadedData.buffer }, [loadedData.buffer]);
+    // A fresh api object per loaded database, so per-database caches start clean.
+    setDb(createDbApi(callWorker));
     setDbName('Browser-saved database');
     setDataVersion((prev) => prev + 1);
     return true;
@@ -145,32 +164,32 @@ export function DatabaseProvider({ children }) {
     return db;
   }, [db]);
 
-  const getRules = useCallback(async (options) => {
+  const getRules = useCallback(async (options?: { activeOnly?: boolean }) => {
     return getRulesRecord(ensureDb(), options);
   }, [ensureDb]);
 
-  const createRule = useCallback(async (rule) => {
+  const createRule = useCallback(async (rule: RuleInput) => {
     const result = await createRuleRecord(ensureDb(), rule);
     notifyDataChanged();
     triggerMutation();
     return result;
   }, [ensureDb, notifyDataChanged, triggerMutation]);
 
-  const updateRule = useCallback(async (ruleId, rule) => {
+  const updateRule = useCallback(async (ruleId: number, rule: RuleInput) => {
     const result = await updateRuleRecord(ensureDb(), ruleId, rule);
     notifyDataChanged();
     triggerMutation();
     return result;
   }, [ensureDb, notifyDataChanged, triggerMutation]);
 
-  const deleteRule = useCallback(async (ruleId) => {
+  const deleteRule = useCallback(async (ruleId: number) => {
     const result = await deleteRuleRecord(ensureDb(), ruleId);
     notifyDataChanged();
     triggerMutation();
     return result;
   }, [ensureDb, notifyDataChanged, triggerMutation]);
 
-  const executeRuleOnDatabase = useCallback(async (rule) => {
+  const executeRuleOnDatabase = useCallback(async (rule: RuleInput) => {
     return executeRuleOnDatabaseRecord(ensureDb(), rule);
   }, [ensureDb]);
 
@@ -178,14 +197,14 @@ export function DatabaseProvider({ children }) {
     return getAnalyticsSettingsConfigRecord(ensureDb());
   }, [ensureDb]);
 
-  const updateAnalyticsSettingsConfig = useCallback(async (updates) => {
+  const updateAnalyticsSettingsConfig = useCallback(async (updates: Partial<AnalyticsSettingsConfig>) => {
     const result = await updateAnalyticsSettingsConfigRecord(ensureDb(), updates);
     notifyDataChanged();
     triggerMutation();
     return result;
   }, [ensureDb, notifyDataChanged, triggerMutation]);
 
-  const value = useMemo(() => ({
+  const value = useMemo<DatabaseContextValue>(() => ({
     db,
     dbName,
     isReady,
@@ -229,13 +248,3 @@ export function DatabaseProvider({ children }) {
 
   return <DatabaseContext.Provider value={value}>{children}</DatabaseContext.Provider>;
 }
-
-export function useDatabase() {
-  const context = useContext(DatabaseContext);
-  if (!context) {
-    throw new Error('useDatabase must be used within a DatabaseProvider.');
-  }
-  return context;
-}
-
-export default DatabaseContext;

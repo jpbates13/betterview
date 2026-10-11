@@ -1,4 +1,4 @@
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, type PieSectorDataItem } from 'recharts';
 
 type CategoryData = {
   category: string;
@@ -20,7 +20,14 @@ type CategoryBreakdownChartProps = {
 // Cohesive modern Tailwind palette (indigo, violet, blue, sky, teal, amber, rose, slate)
 const COLORS = ['#6366f1', '#8b5cf6', '#3b82f6', '#0ea5e9', '#14b8a6', '#f59e0b', '#f43f5e', '#64748b'];
 
-const CustomTooltip = ({ active, payload }: any) => {
+type Slice = CategoryData & { absTotal: number; percentage: number };
+
+type CategoryTooltipProps = {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload: Slice }>;
+};
+
+const CustomTooltip = ({ active, payload }: CategoryTooltipProps) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     return (
@@ -86,7 +93,7 @@ export default function CategoryBreakdownChart({ data, onCategoryClick, total_in
               dataKey="absTotal"
               nameKey="category"
               stroke="none"
-              onClick={(data: any) => onCategoryClick && onCategoryClick(data.name)}
+              onClick={(data: PieSectorDataItem) => onCategoryClick && onCategoryClick(String(data.name))}
               cursor={onCategoryClick ? 'pointer' : 'default'}
             >
               {finalData.map((_, index) => (

@@ -147,8 +147,8 @@ export default function SplitTransactionModal({
       setError(null);
       await onSubmit({ splits: lines });
       onClose();
-    } catch (err: any) {
-      setError(err?.message || 'Failed to split transaction.');
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Failed to split transaction.');
     } finally {
       setIsSubmitting(false);
     }
