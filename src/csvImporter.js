@@ -9,7 +9,10 @@ import { saveDbToBrowser } from './dbStorage.js';
 
 export const parseAmount = (value) => {
   if (value === null || value === undefined) return null;
-  let cleaned = String(value).replace(/[$,\s]/g, '').trim();
+  let cleaned = String(value)
+    .replace(/[\u2212\u2012\u2013\u2014]/g, '-') // typographic minus signs
+    .replace(/[$,\s]|usd/gi, '')
+    .trim();
   if (!cleaned) return null;
 
   // Accounting style negatives: (12.34)
@@ -56,10 +59,17 @@ const toIso = (year, month, day) => {
 // Parses only formats we can read unambiguously; never falls back to the
 // locale-dependent `new Date(string)`. Returns null for anything else.
 export const parseDateToIso = (value, format = 'auto') => {
-  const raw = normalizeText(value).replace(/\s+\d{1,2}:\d{2}(:\d{2})?(\s*[ap]m)?$/i, '');
+  const raw = normalizeText(value)
+    .replace(/^=?"(.*)"$/, '$1')
+    // Drop a trailing time and zone: "2026-10-09T00:00:00Z", "10/09/2026 12:00 AM", "... 00:00:00 +0000"
+    .replace(/[T\s]+\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?(\s*[ap]\.?m\.?)?(\s*(Z|[+-]\d{2}:?\d{2}|[A-Z]{2,4}))?$/i, '')
+    .trim();
   if (!raw) return null;
 
   let match = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (match) return toIso(match[1], match[2], match[3]);
+
+  match = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (match) return toIso(match[1], match[2], match[3]);
 
   match = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/);
@@ -71,17 +81,14 @@ export const parseDateToIso = (value, format = 'auto') => {
     return Number(first) > 12 ? toIso(year, second, first) : toIso(year, first, second);
   }
 
-  // "Mar 4, 2026", "4 Mar 2026", "March 04 2026"
-  match = raw.match(/^([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
-  if (match) {
-    const month = MONTHS.indexOf(match[1].slice(0, 3).toLowerCase()) + 1;
-    return month ? toIso(match[3], String(month), match[2]) : null;
-  }
-  match = raw.match(/^(\d{1,2})[\s-]([A-Za-z]{3,})[\s-](\d{4})$/);
-  if (match) {
-    const month = MONTHS.indexOf(match[2].slice(0, 3).toLowerCase()) + 1;
-    return month ? toIso(match[3], String(month), match[1]) : null;
-  }
+  // Month names are unambiguous in any order: "Mar 4, 2026", "Oct-09-2026", "4 Mar 2026",
+  // "09-Oct-26", "Friday, October 9, 2026".
+  const withoutWeekday = raw.replace(/^[A-Za-z]+day,?\s+/i, '');
+  const monthOf = (name) => MONTHS.indexOf(name.slice(0, 3).toLowerCase()) + 1;
+  match = withoutWeekday.match(/^([A-Za-z]{3,})\.?[\s\-/]+(\d{1,2})(?:st|nd|rd|th)?,?[\s\-/]+(\d{4}|\d{2})$/);
+  if (match && monthOf(match[1])) return toIso(match[3], String(monthOf(match[1])), match[2]);
+  match = withoutWeekday.match(/^(\d{1,2})(?:st|nd|rd|th)?[\s\-/]+([A-Za-z]{3,})\.?,?[\s\-/]+(\d{4}|\d{2})$/);
+  if (match && monthOf(match[2])) return toIso(match[3], String(monthOf(match[2])), match[1]);
 
   return null;
 };

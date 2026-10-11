@@ -24,9 +24,36 @@ describe('parsing', () => {
     expect(parseDateToIso('13/13/2026', 'MDY')).toBeNull();
     expect(parseDateToIso('not a date')).toBeNull();
   });
+
+  it.each([
+    ['2026-10-09T00:00:00Z'], ['2026-10-09T00:00:00.000-04:00'], ['10/09/2026 12:00:00 AM'], ['Oct-09-2026'],
+    ['09-Oct-2026'], ['09-Oct-26'], ['Friday, October 9, 2026'], ['October 9th, 2026'], ['20261009'], ['="10/09/2026"'],
+  ])('reads the export date %s', (raw) => {
+    expect(parseDateToIso(raw)).toBe('2026-10-09');
+  });
+
+  it('reads typographic minus signs and currency suffixes', () => {
+    expect(parseAmount('\u22122.40')).toBe(-2.4);
+    expect(parseAmount('$-2.40')).toBe(-2.4);
+    expect(parseAmount('2.40 USD')).toBe(2.4);
+  });
 });
 
 describe('importing', () => {
+  it('imports a Fidelity Full View export with timestamped dates', async () => {
+    const db = makeDb();
+    const csv = `"Date","Account","Description","Category","Tags","Amount"
+"2026-10-07T00:00:00","Venture X","MBTA","Auto & transport","","-2.40"
+"2026-10-07T00:00:00","Venture X","MBTA","Auto & transport","","-2.40"
+"2026-10-06T00:00:00","Cash Management","DIRECT DEPOSIT VENMO CASHOUT","Cash & ATM","","35.00"
+`;
+    const summary = await importCsvToDatabase(csvFile(csv, 'Transactions_Oct-11-2026 at 4.34.02 PM.csv'), db);
+    expect(summary.profileName).toBe('Fidelity (built-in)');
+    expect(summary.skipped).toEqual([]);
+    expect(summary.inserted).toBe(3);
+    expect(visibleRows(db, "description = 'MBTA'")).toHaveLength(2);
+  });
+
   it('keeps genuine repeats in one file but skips them on re-import', async () => {
     const db = makeDb();
     const first = await importCsvToDatabase(csvFile(FIDELITY), db);
@@ -37,6 +64,16 @@ describe('importing', () => {
     expect(second.inserted).toBe(0);
     expect(second.duplicates).toBe(3);
     expect(visibleRows(db)).toHaveLength(3);
+  });
+
+  it('recovers a same-day repeat that an older version dropped when the file is re-imported', async () => {
+    const db = makeDb();
+    // Older imports kept only one of two identical rows.
+    await importCsvToDatabase(csvFile('Date,Description,Amount,Account\n2026-10-07,MBTA,-2.40,Visa\n', 'old.csv'), db);
+    const again = await importCsvToDatabase(csvFile('Date,Description,Amount,Account\n2026-10-07,MBTA,-2.40,Visa\n2026-10-07,MBTA,-2.40,Visa\n', 'full.csv'), db);
+    expect(again.inserted).toBe(1);
+    expect(again.duplicates).toBe(1);
+    expect(visibleRows(db)).toHaveLength(2);
   });
 
   it('asks for a mapping for unknown formats, then imports with a saved profile', async () => {

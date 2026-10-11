@@ -116,7 +116,7 @@ export default function SpendingTrendChart({ data, onBarClick }: { data: TrendDa
           axisLine={false}
           tickLine={false}
           tick={{ fill: '#6B7280', fontSize: 12 }}
-          tickFormatter={(val) => `$${val.toLocaleString()}`}
+          tickFormatter={(val) => `${val < 0 ? "-" : ""}$${Math.abs(val).toLocaleString()}`}
           width={80}
         />
         <Tooltip content={<CustomTooltip hiddenBars={hiddenBars} />} cursor={{ fill: '#F3F4F6', opacity: 0.6 }} />

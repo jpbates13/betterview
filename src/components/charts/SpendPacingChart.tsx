@@ -270,7 +270,7 @@ export default function SpendPacingChart({ data, filter, showSpikeMarkers = fals
                             axisLine={false}
                             tickLine={false}
                             tick={{ fill: '#6B7280', fontSize: 12 }}
-                            tickFormatter={(val) => `$${val.toLocaleString()}`}
+                            tickFormatter={(val) => `${val < 0 ? "-" : ""}$${Math.abs(val).toLocaleString()}`}
                             width={80}
                         />
                         <Tooltip content={<CustomTooltip hiddenBars={hiddenBars} filter={filter} showSpikeMarkers={showSpikeMarkers} comparisonMode={comparisonMode} paceMode={paceMode} />} cursor={{ stroke: '#E5E7EB', strokeWidth: 2 }} />
