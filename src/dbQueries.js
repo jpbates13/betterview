@@ -90,8 +90,8 @@ const parseArraySettingValue = (rawValue, fallback) => {
 
   try {
     const parsed = JSON.parse(String(rawValue ?? ''));
-    const normalized = normalizeStringList(parsed);
-    return normalized.length > 0 ? normalized : parsedFallback;
+    // A saved empty list means the user cleared it on purpose; only fall back when unreadable.
+    return Array.isArray(parsed) ? normalizeStringList(parsed) : parsedFallback;
   } catch {
     return parsedFallback;
   }
@@ -223,9 +223,7 @@ const getAnalyticsSqlFragments = async (db) => {
 };
 
 const serializeStringListSetting = (values, fallbackValues = []) => {
-  const normalized = normalizeStringList(values);
-  const fallback = normalizeStringList(fallbackValues);
-  const finalValues = normalized.length > 0 ? normalized : fallback;
+  const finalValues = Array.isArray(values) ? normalizeStringList(values) : normalizeStringList(fallbackValues);
   return JSON.stringify(finalValues);
 };
 
