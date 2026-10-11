@@ -1,6 +1,6 @@
 // Budgets, tags, reimbursements, recurring charges, net worth and yearly summaries.
 import { saveDbToBrowser } from '../dbStorage.js';
-import { bootstrapSchema, getAnalyticsInclusionSql } from '../dbQueries.js';
+import { bootstrapSchema, getAnalyticsInclusionSql, getCategoryNetSpending } from '../dbQueries.js';
 import { binds, changes, inTransaction, normalizeText, placeholders, queryRows, round2, toNumber } from './sql.js';
 
 const monthBounds = (month) => {
@@ -197,20 +197,11 @@ export async function deleteBudget(db, category) {
   await saveDbToBrowser(db);
 }
 
-// Net spending per category for a date range: included expenses minus reimbursements linked to them.
+// Net spending per category for a date range (expenses minus reimbursements), the
+// same figures the Analytics category breakdown shows.
 export async function getNetSpendingByCategory(db, startDate, endDate) {
-  const included = await getAnalyticsInclusionSql(db);
-  const rows = await queryRows(db, `
-    SELECT category, SUM(spent) AS spent FROM (
-      SELECT category, -amount AS spent FROM transactions
-      WHERE is_hidden = 0 AND amount < 0 AND date BETWEEN ? AND ? AND ${included}
-      UNION ALL
-      SELECT e.category, -r.amount AS spent FROM transactions r
-      JOIN transactions e ON e.id = r.reimburses_id
-      WHERE r.is_hidden = 0 AND r.amount > 0 AND r.date BETWEEN ? AND ?
-    ) GROUP BY category;
-  `, binds(startDate, endDate, startDate, endDate));
-  return new Map(rows.map((row) => [row.category, round2(row.spent)]));
+  const rows = await getCategoryNetSpending(db, { startDate, endDate });
+  return new Map(rows.map((row) => [row.category, row.net]));
 }
 
 // Each budget with this month's spending and where it should be by today.
@@ -401,7 +392,7 @@ export async function getYearSummary(db, year) {
   const byCategory = await getNetSpendingByCategory(db, start, end);
   const [totals] = await queryRows(db, `
     SELECT
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${included} THEN amount END), 0) AS income,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${included} THEN amount END), 0) AS income,
       COALESCE(SUM(CASE WHEN amount < 0 AND ${included} THEN -amount END), 0) AS gross_expenses
     FROM transactions WHERE is_hidden = 0 AND date BETWEEN ? AND ?;
   `, binds(start, end));
@@ -435,7 +426,7 @@ export async function getYearSummary(db, year) {
 
 // Income, net spending and savings rate per month for the last `months` months
 // (ending with the month containing `today`), using the same rules as getYearSummary:
-// income is included "Income" rows; spending is included expenses minus linked reimbursements.
+// income is included "Income" rows; spending is net of reimbursements, as in the category breakdown.
 export async function getMonthlySavingsRate(db, { months = 12, today = new Date().toISOString().slice(0, 10) } = {}) {
   await bootstrapSchema(db);
   const [year, month] = today.split('-').map(Number);
@@ -452,23 +443,16 @@ export async function getMonthlySavingsRate(db, { months = 12, today = new Date(
   const incomeRows = await queryRows(db, `
     SELECT strftime('%Y-%m', date) AS month, COALESCE(SUM(amount), 0) AS income
     FROM transactions
-    WHERE is_hidden = 0 AND amount > 0 AND LOWER(category) = 'income' AND ${included}
+    WHERE is_hidden = 0 AND amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${included}
       AND date BETWEEN ? AND ?
     GROUP BY 1;
   `, binds(start, end));
-  const spentRows = await queryRows(db, `
-    SELECT month, SUM(spent) AS spent FROM (
-      SELECT strftime('%Y-%m', date) AS month, -amount AS spent FROM transactions
-      WHERE is_hidden = 0 AND amount < 0 AND date BETWEEN ? AND ? AND ${included}
-      UNION ALL
-      SELECT strftime('%Y-%m', r.date) AS month, -r.amount AS spent FROM transactions r
-      JOIN transactions e ON e.id = r.reimburses_id
-      WHERE r.is_hidden = 0 AND r.amount > 0 AND r.date BETWEEN ? AND ?
-    ) GROUP BY month;
-  `, binds(start, end, start, end));
+  const spentByMonth = new Map();
+  for (const row of await getCategoryNetSpending(db, { startDate: start, endDate: end, byMonth: true })) {
+    spentByMonth.set(row.month, round2((spentByMonth.get(row.month) ?? 0) + row.net));
+  }
 
   const incomeByMonth = new Map(incomeRows.map((row) => [row.month, round2(row.income)]));
-  const spentByMonth = new Map(spentRows.map((row) => [row.month, round2(row.spent)]));
   return keys.map((key) => {
     const income = incomeByMonth.get(key) ?? 0;
     const spent = spentByMonth.get(key) ?? 0;

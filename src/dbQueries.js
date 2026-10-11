@@ -191,11 +191,19 @@ const getAnalyticsSqlFragments = async (db) => {
   )`;
 
   const reimbursementExcludedCategoriesSql = buildNotInListSql(settings.reimbursementExcludedCategories);
+  // Incoming money that offsets spending: anything linked to an expense, plus positive
+  // rows outside the excluded categories (income, transfers, ...).
+  const reimbursementConditionSql = `(
+    amount > 0 AND ${includedConditionSql} AND (
+      reimburses_id IS NOT NULL OR LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql}
+    )
+  )`;
 
   return {
     excludedPatternSql,
     includedConditionSql,
     reimbursementExcludedCategoriesSql,
+    reimbursementConditionSql,
   };
 };
 
@@ -1316,13 +1324,13 @@ const dateRange = (startDate, endDate) => {
 export async function getKpis(db, month) {
   const {
     includedConditionSql,
-    reimbursementExcludedCategoriesSql,
+    reimbursementConditionSql,
   } = await getAnalyticsSqlFragments(db);
 
   const rows = await queryRows(db, `
     SELECT
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_reimbursements,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS total_reimbursements,
       COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
     FROM transactions
@@ -1344,67 +1352,76 @@ export async function getKpis(db, month) {
   };
 }
 
-export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
-  const {
-    includedConditionSql,
-    reimbursementExcludedCategoriesSql,
-  } = await getAnalyticsSqlFragments(db);
-
+/**
+ * Spending per category for a date range: gross (included expenses), reimbursed
+ * (credits linked to an expense count in that expense's category; other credits
+ * count in their own category) and net = gross - reimbursed. Uses the same
+ * reimbursement rule as the KPI and trend totals, so the categories add up to them.
+ * With `byMonth`, rows are also split by the transaction's month.
+ */
+export async function getCategoryNetSpending(db, { startDate, endDate, byMonth = false } = {}) {
+  const { includedConditionSql, reimbursementConditionSql } = await getAnalyticsSqlFragments(db);
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
+  const monthSql = byMonth ? "strftime('%Y-%m', date)" : "''";
 
-  // Reimbursements linked to an expense count against that expense's category.
-  const linkedDateClause = dateClause.replace(/\bdate\b/g, 'r.date');
-  const categoryRows = await queryRows(db, `
-    SELECT category, SUM(amount) AS total FROM (
-      SELECT category, amount
+  const rows = await queryRows(db, `
+    SELECT month, category, SUM(gross) AS gross, SUM(reimbursed) AS reimbursed FROM (
+      SELECT ${monthSql} AS month, category, -amount AS gross, 0 AS reimbursed
       FROM transactions
-      WHERE amount < 0
-        AND is_hidden = 0
-        AND ${includedConditionSql}
-        ${dateClause}
+      WHERE is_hidden = 0 AND amount < 0 AND ${includedConditionSql} ${dateClause}
       UNION ALL
-      SELECT e.category, r.amount
-      FROM transactions r
-      JOIN transactions e ON e.id = r.reimburses_id
-      WHERE r.amount > 0 AND r.is_hidden = 0
-        ${linkedDateClause}
+      SELECT r.month, COALESCE(e.category, r.category) AS category, 0 AS gross, r.amount AS reimbursed
+      FROM (
+        SELECT ${monthSql} AS month, category, amount, reimburses_id
+        FROM transactions
+        WHERE is_hidden = 0 AND ${reimbursementConditionSql} ${dateClause}
+      ) r
+      LEFT JOIN transactions e ON e.id = r.reimburses_id
     )
-    GROUP BY category
-    HAVING SUM(amount) < 0
-    ORDER BY total ASC;
+    GROUP BY month, category;
   `, [...dateParams, ...dateParams]);
 
-  const totalRows = await queryRows(db, `
-    SELECT
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
-      COALESCE(SUM(CASE WHEN amount > 0
-        AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql}
-        AND ${includedConditionSql}
-      THEN amount ELSE 0 END), 0) AS reimbursed_amount
-    FROM transactions
-    WHERE 1=1
-      AND is_hidden = 0
-      ${dateClause};
-  `, dateParams);
+  return rows.map((row) => {
+    const gross = round2(row.gross);
+    const reimbursed = round2(row.reimbursed);
+    return {
+      ...(byMonth ? { month: row.month } : {}),
+      category: row.category,
+      gross,
+      reimbursed,
+      net: round2(gross - reimbursed),
+    };
+  });
+}
 
-  const totals = totalRows[0] || {};
-  const grossExpenses = round2(totals.gross_expenses || 0);
-  const reimbursedAmount = round2(totals.reimbursed_amount || 0);
+export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
+  const rows = await getCategoryNetSpending(db, { startDate, endDate });
+  const totalGross = round2(rows.reduce((sum, row) => sum + row.gross, 0));
+  const totalReimbursed = round2(rows.reduce((sum, row) => sum + row.reimbursed, 0));
+  const toCategory = (row) => ({
+    category: row.category,
+    // Negative like the transactions themselves; existing callers sort and chart on it.
+    total: -row.net,
+    gross: row.gross,
+    reimbursed: row.reimbursed,
+    net: row.net,
+  });
 
   return {
-    categories: categoryRows.map((row) => ({
-      category: row.category,
-      total: round2(row.total),
-    })),
-    total_gross_expenses: grossExpenses,
-    total_net_expenses: round2(grossExpenses - reimbursedAmount),
+    // Categories with net spending, largest first.
+    categories: rows.filter((row) => row.net > 0).sort((a, b) => b.net - a.net).map(toCategory),
+    // Categories whose reimbursements covered all their spending (or more) in this range.
+    reimbursed_categories: rows.filter((row) => row.net <= 0).sort((a, b) => a.net - b.net).map(toCategory),
+    total_gross_expenses: totalGross,
+    total_reimbursed: totalReimbursed,
+    total_net_expenses: round2(totalGross - totalReimbursed),
   };
 }
 
 export async function getSpendingTrend(db, { startDate, endDate } = {}) {
   const {
     includedConditionSql,
-    reimbursementExcludedCategoriesSql,
+    reimbursementConditionSql,
   } = await getAnalyticsSqlFragments(db);
 
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
@@ -1413,8 +1430,8 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
   const rows = await queryRows(db, `
     SELECT
       strftime('%Y-%m', date) AS month,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
       COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
     FROM transactions
@@ -1442,7 +1459,7 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
 export async function getDailySpending(db, { startDate, endDate } = {}) {
   const {
     includedConditionSql,
-    reimbursementExcludedCategoriesSql,
+    reimbursementConditionSql,
   } = await getAnalyticsSqlFragments(db);
 
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
@@ -1451,8 +1468,8 @@ export async function getDailySpending(db, { startDate, endDate } = {}) {
   const rows = await queryRows(db, `
     SELECT
       date AS day,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
+      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
+      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
       COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses
     FROM transactions
     ${whereClause}
