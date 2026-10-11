@@ -40,6 +40,27 @@ describe('parsing', () => {
 });
 
 describe('importing', () => {
+  it('imports a Fidelity spending export with Mon-DD-YYYY dates, title line and footer', async () => {
+    const db = makeDb();
+    const csv = `\uFEFFSpending Transactions: \r
+"Date","Description","Amount (in $)","Account Name","Transaction Type","Category","Subcategory","Hidden Transaction"
+"Oct-09-2026","MBTA","-2.4","Venture X","Expenses","Auto & transport","Public transit","No"
+"Oct-09-2026","MBTA","-2.4","Venture X","Expenses","Auto & transport","Public transit","No"
+"Oct-07-2026","ELECTRONIC PAYMENT","70.71","Venture X","Transfers","Transfers","Credit card payment","No"
+
+"Date downloaded 10/11/2026  4:37 PM"
+
+"1099065.2.0"
+`;
+    const summary = await importCsvToDatabase(csvFile(csv, 'Transactions_Oct-11-2026 at 4.37.39 PM.csv'), db);
+    expect(summary.profileName).toBe('Fidelity (built-in)');
+    expect(summary.skipped).toEqual([]);
+    expect(summary.inserted).toBe(3);
+    expect(visibleRows(db, "description = 'MBTA'")).toEqual([['MBTA', -2.4, 'Auto & transport'], ['MBTA', -2.4, 'Auto & transport']]);
+    const again = await importCsvToDatabase(csvFile(csv, 'again.csv'), db);
+    expect([again.inserted, again.duplicates]).toEqual([0, 3]);
+  });
+
   it('imports a Fidelity Full View export with timestamped dates', async () => {
     const db = makeDb();
     const csv = `"Date","Account","Description","Category","Tags","Amount"
