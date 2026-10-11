@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type LifestyleInflationDialProps = {
   score: number | null;
@@ -41,18 +41,21 @@ export default function LifestyleInflationDial({
   const safeScore = hasData ? clamp(score, -100, 100) : 0;
 
   const [animatedScore, setAnimatedScore] = useState(0);
+  // Latest drawn value, so a new animation starts from where the needle is.
+  const animatedScoreRef = useRef(0);
 
   useEffect(() => {
     const target = hasData ? safeScore : 0;
     let rafId = 0;
     const durationMs = 700;
     const start = performance.now();
-    const initial = animatedScore;
+    const initial = animatedScoreRef.current;
 
     const tick = (now: number) => {
       const progress = Math.min((now - start) / durationMs, 1);
       const eased = 1 - Math.pow(1 - progress, 3);
       const next = initial + (target - initial) * eased;
+      animatedScoreRef.current = next;
       setAnimatedScore(next);
 
       if (progress < 1) {

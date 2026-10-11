@@ -25,6 +25,13 @@ The transactions schema is SQLite-compatible and used across local browser and s
 - `dedupe_source_date` (TEXT)
 - `split_parent_id` (INTEGER nullable)
 - `is_hidden` (INTEGER default `0`)
+- `dedupe_seq` (INTEGER; occurrence number of identical rows within one file)
+- `import_batch_id` (TEXT; the import that added the row, for undo)
+- `applied_rule_id` (INTEGER; the rule that last categorized or split the row)
+- `merchant` (TEXT; cleaned merchant name)
+- `reimburses_id` (INTEGER; the expense a refund or reimbursement offsets)
+
+Supporting tables: `rules`, `import_batches`, `csv_profiles`, `merchant_rules`, `transaction_tags`, `budgets`, `account_balances`, `app_settings`.
 
 ### Runtime flow
 1. App starts and initializes SQL.js in `src/workers/sqlWorker.js`.
@@ -81,16 +88,40 @@ npm install
 npm run dev
 ```
 
-Then open the local Vite URL (typically `http://localhost:5173`).
+Then open `http://localhost:9445`.
 
 ## CSV Import Behavior
-The importer (`src/csvImporter.js`) currently supports Fidelity-style transaction/history exports and:
+The importer (`src/csvImporter.js`) recognizes Fidelity transaction and history exports. Any other bank's CSV opens a column-mapping step: pick the date, description, amount (or separate debit and credit) and account columns, the date order (month first, day first or year first) and the sign convention, then optionally save it as a named format. Saved formats are matched automatically on later imports.
 
-- strips preamble/footer noise
-- normalizes dates/amounts
-- filters excluded retirement accounts
-- inserts with `INSERT OR IGNORE` against `(date, description, amount)`
-- persists the updated DB to browser storage
+- Dates are parsed only in explicit formats; ambiguous or unreadable dates are skipped and listed, never guessed.
+- Amounts accept `$1,234.56`, `(12.00)`, `12.00-` and `CR`/`DR` suffixes.
+- Duplicates are detected on `(date, description, amount)` plus an occurrence number within the file, so two identical coffees on one day both import, while re-importing the same file adds nothing.
+- Every import is recorded as a batch: the results panel shows what was added, skipped and changed by rules, and the import can be undone from the results panel or the Data page.
+
+## Running It On Your Tailnet
+`npm run dev` listens on localhost only. To use the app from other devices, serve a production build and let Tailscale proxy to it rather than exposing the dev server:
+
+```bash
+npm run serve:tailnet          # vite build, then vite preview on localhost:9445
+tailscale serve --bg --https=8443 http://localhost:9445
+```
+
+Add the resulting `https://<machine>.<tailnet>.ts.net:8443` URL to the OAuth client's authorized JavaScript origins in Google Cloud Console. Vite already allows `*.ts.net` hosts; set `VITE_ALLOWED_HOST` for any other hostname.
+
+## Google Drive Access
+- Sign-in requests only the `drive.file` scope, which lets the app see files it created itself and nothing else in your Drive. Keep it that way; widening to the full `drive` scope is never needed.
+- The access token lives in `sessionStorage` (this tab only) and lasts about an hour. A few minutes before it ends a banner offers "Stay signed in", and pending edits are uploaded before it expires.
+- Before the first sync each day, the Drive copy is saved as `betterview_transactions.YYYY-MM-DD.db`; the newest 14 are kept and can be restored from the Data page.
+- If another device changed the Drive copy since this device last synced, syncing pauses and asks whether to keep this device's copy, take the Drive copy, or download this device's copy first.
+- Optional encryption (Data page) encrypts the Drive copy with AES-256-GCM using a key derived from your passphrase (PBKDF2, 310,000 rounds). The browser copy stays unencrypted so the app stays fast.
+
+## Development
+```bash
+npm test          # Vitest suite (CSV parsing, dedupe, splits, rules, budgets, recurring, ...)
+npm run lint
+npm run build     # type-checks, then builds
+```
+GitHub Actions runs all three on every push and pull request.
 
 ## Data Safety Checklist
 This repo handles sensitive financial data. Before pushing:
@@ -107,8 +138,6 @@ This repo handles sensitive financial data. Before pushing:
 
 ## Notes And Current Constraints
 - Google OAuth client ID is configured through `.env.local` using `VITE_GOOGLE_OAUTH_CLIENT_ID`.
-- Login currently requires Google Drive connection before entering the dashboard.
+- Login requires a Google Drive connection before entering the dashboard.
 - Browser storage is the source of truth during a session; Drive sync is eventual.
-
-## Roadmap Direction
-- Add conflict metadata/versioning for multi-device reconciliation.
+- Every save still writes the whole SQLite file to IndexedDB (overlapping saves are coalesced). An OPFS-backed SQLite build would make writes incremental if the database grows large.

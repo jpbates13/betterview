@@ -1,7 +1,7 @@
 // Budgets, tags, reimbursements, recurring charges, net worth and yearly summaries.
 import { saveDbToBrowser } from '../dbStorage.js';
 import { bootstrapSchema, getAnalyticsInclusionSql } from '../dbQueries.js';
-import { binds, inTransaction, normalizeText, placeholders, queryRows, round2, toNumber } from './sql.js';
+import { binds, changes, inTransaction, normalizeText, placeholders, queryRows, round2, toNumber } from './sql.js';
 
 const monthBounds = (month) => {
   const [year, monthIndex] = month.split('-').map(Number);
@@ -81,12 +81,15 @@ export async function bulkSetCategory(db, transactionIds, category) {
   const clean = normalizeText(category);
   if (!clean) throw new Error('Enter a category.');
   if (transactionIds.length === 0) return 0;
+  // Split halves keep their category until the split is undone.
   await db.exec(
-    `UPDATE transactions SET category = ?, applied_rule_id = NULL WHERE id IN (${placeholders(transactionIds.length)});`,
+    `UPDATE transactions SET category = ?, applied_rule_id = NULL
+     WHERE id IN (${placeholders(transactionIds.length)}) AND split_parent_id IS NULL;`,
     binds(clean, ...transactionIds),
   );
+  const updated = await changes(db);
   await saveDbToBrowser(db);
-  return transactionIds.length;
+  return updated;
 }
 
 export async function bulkSetOverride(db, transactionIds, overrideStatus) {
@@ -146,7 +149,19 @@ export async function getReimbursementStatus(db) {
   });
 }
 
+// Credits linked to one expense.
+export async function getLinkedReimbursements(db, expenseId) {
+  return queryRows(db, `
+    SELECT id, date, description, amount FROM transactions
+    WHERE reimburses_id = ? AND is_hidden = 0 ORDER BY date;
+  `, binds(expenseId));
+}
+
 // Positive rows not yet linked to anything, as candidates for linking.
+/**
+ * @param {any} db
+ * @param {{ aroundDate?: string, days?: number }} [options]
+ */
 export async function getUnlinkedCredits(db, { aroundDate, days = 60 } = {}) {
   const params = [];
   let dateSql = '';
@@ -420,6 +435,67 @@ export async function getYearSummary(db, year) {
     topMerchants: topMerchants.map((row) => ({ merchant: row.merchant, count: Number(row.count), spent: round2(row.spent) })),
     monthly: monthly.map((row) => ({ month: Number(row.month), spent: round2(row.spent) })),
   };
+}
+
+// Income, net spending and savings rate per month for the last `months` months
+// (ending with the month containing `today`), using the same rules as getYearSummary:
+// income is included "Income" rows; spending is included expenses minus linked reimbursements.
+export async function getMonthlySavingsRate(db, { months = 12, today = new Date().toISOString().slice(0, 10) } = {}) {
+  await bootstrapSchema(db);
+  const [year, month] = today.split('-').map(Number);
+  const keys = [];
+  for (let i = months - 1; i >= 0; i -= 1) {
+    const d = new Date(Date.UTC(year, month - 1 - i, 1));
+    keys.push(d.toISOString().slice(0, 7));
+  }
+  if (keys.length === 0) return [];
+  const start = `${keys[0]}-01`;
+  const end = monthBounds(keys[keys.length - 1]).end;
+  const included = await getAnalyticsInclusionSql(db);
+
+  const incomeRows = await queryRows(db, `
+    SELECT strftime('%Y-%m', date) AS month, COALESCE(SUM(amount), 0) AS income
+    FROM transactions
+    WHERE is_hidden = 0 AND amount > 0 AND LOWER(category) = 'income' AND ${included}
+      AND date BETWEEN ? AND ?
+    GROUP BY 1;
+  `, binds(start, end));
+  const spentRows = await queryRows(db, `
+    SELECT month, SUM(spent) AS spent FROM (
+      SELECT strftime('%Y-%m', date) AS month, -amount AS spent FROM transactions
+      WHERE is_hidden = 0 AND amount < 0 AND date BETWEEN ? AND ? AND ${included}
+      UNION ALL
+      SELECT strftime('%Y-%m', r.date) AS month, -r.amount AS spent FROM transactions r
+      JOIN transactions e ON e.id = r.reimburses_id
+      WHERE r.is_hidden = 0 AND r.amount > 0 AND r.date BETWEEN ? AND ?
+    ) GROUP BY month;
+  `, binds(start, end, start, end));
+
+  const incomeByMonth = new Map(incomeRows.map((row) => [row.month, round2(row.income)]));
+  const spentByMonth = new Map(spentRows.map((row) => [row.month, round2(row.spent)]));
+  return keys.map((key) => {
+    const income = incomeByMonth.get(key) ?? 0;
+    const spent = spentByMonth.get(key) ?? 0;
+    return {
+      month: key,
+      income,
+      spent,
+      saved: round2(income - spent),
+      savingsRate: income > 0 ? (income - spent) / income : null,
+    };
+  });
+}
+
+// Distinct categories in use, plus any that have a budget, for pickers.
+export async function getCategoryNames(db) {
+  await bootstrapSchema(db);
+  const rows = await queryRows(db, `
+    SELECT category FROM transactions WHERE category IS NOT NULL AND TRIM(category) <> ''
+    UNION
+    SELECT category FROM budgets
+    ORDER BY 1 COLLATE NOCASE;
+  `);
+  return rows.map((row) => String(row.category));
 }
 
 const csvCell = (value) => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { format, parseISO } from 'date-fns';
 
@@ -165,7 +165,10 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {}, filter, showSp
 };
 
 export default function SpendPacingChart({ data, filter, showSpikeMarkers = false, comparisonMode = 'previous-period' }: { data: PacingData[], filter: string, showSpikeMarkers?: boolean, comparisonMode?: 'previous-period' | 'previous-year' }) {
-    const [hiddenBars, setHiddenBars] = useState<Record<string, boolean>>({});
+    // Hidden series reset whenever the filter or the data range changes.
+    const resetKey = `${filter}|${data.length}`;
+    const [hiddenState, setHiddenState] = useState<{ key: string, bars: Record<string, boolean> }>({ key: resetKey, bars: {} });
+    const hiddenBars = hiddenState.key === resetKey ? hiddenState.bars : {};
     const [paceMode, setPaceMode] = useState<'expense' | 'income'>('expense');
     const currentSpikeDays = useMemo(
         () => (showSpikeMarkers && paceMode === 'expense' ? getSpikeDays(data, 'current_day_spend', 'current_top_transaction') : new Set<number>()),
@@ -193,16 +196,12 @@ export default function SpendPacingChart({ data, filter, showSpikeMarkers = fals
     );
     const maxDay = data.length > 0 ? data[data.length - 1].day : 1;
 
-    useEffect(() => {
-        setHiddenBars({});
-    }, [filter, data.length]);
-
     const handleLegendClick = (e: any) => {
         const dataKey = e.dataKey;
-        setHiddenBars(prev => ({
-            ...prev,
-            [dataKey]: !prev[dataKey]
-        }));
+        setHiddenState(prev => {
+            const bars = prev.key === resetKey ? prev.bars : {};
+            return { key: resetKey, bars: { ...bars, [dataKey]: !bars[dataKey] } };
+        });
     };
 
     const currentDataKey = paceMode === 'income' ? 'current_income' : 'current_spend';

@@ -89,7 +89,7 @@ export const parseDateToIso = (value, format = 'auto') => {
 // ── CSV parsing ──────────────────────────────────────────────────────────────
 
 const stripPreambleAndFooter = (rawText) => {
-  const lines = String(rawText || '').replace(/^﻿/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const lines = String(rawText || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
 
   while (lines.length > 0 && lines[0].trim() === '') {
     lines.shift();

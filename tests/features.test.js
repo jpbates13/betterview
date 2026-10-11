@@ -123,6 +123,31 @@ describe('year summary and export', () => {
   });
 });
 
+describe('monthly savings rate', () => {
+  it('matches the year summary rules month by month', async () => {
+    const db = await freshDb();
+    await tx(db, '2026-01-15', 'PAYCHECK', 4000, 'Income');
+    await tx(db, '2026-01-20', 'RENT', -1500, 'Housing');
+    const { id: dinner } = await tx(db, '2026-02-05', 'DINNER', -200, 'Dining');
+    const { id: refund } = await tx(db, '2026-02-06', 'VENMO', 50, 'Reimbursement');
+    await f.linkReimbursement(db, refund, dinner);
+    await tx(db, '2025-12-31', 'OLD', -999, 'Misc');
+    const series = await f.getMonthlySavingsRate(db, { months: 3, today: '2026-03-10' });
+    expect(series.map((m) => m.month)).toEqual(['2026-01', '2026-02', '2026-03']);
+    expect(series[0]).toMatchObject({ income: 4000, spent: 1500, saved: 2500 });
+    expect(series[0].savingsRate).toBeCloseTo(0.625);
+    expect(series[1]).toMatchObject({ income: 0, spent: 150, savingsRate: null });
+    expect(series[2]).toMatchObject({ income: 0, spent: 0, savingsRate: null });
+  });
+
+  it('lists categories for pickers', async () => {
+    const db = await freshDb();
+    await tx(db, '2026-01-20', 'RENT', -1500, 'Housing');
+    await f.setBudget(db, 'Travel', 100);
+    expect(await f.getCategoryNames(db)).toEqual(['Housing', 'Travel']);
+  });
+});
+
 describe('bulk edits', () => {
   it('recategorizes and refuses to delete split halves', async () => {
     const db = await freshDb();

@@ -5,11 +5,14 @@ import CategoryBreakdownChart from '../components/charts/CategoryBreakdownChart'
 import DataTable from '../components/DataTable';
 import TransactionModal from '../components/TransactionModal';
 import SplitTransactionModal from '../components/SplitTransactionModal';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { AlertTriangle, Maximize2, Minimize2 } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import SpendPacingChart from '../components/charts/SpendPacingChart';
 import LifestyleInflationDial from '../components/charts/LifestyleInflationDial';
 import { useDatabase } from '../DatabaseContext.jsx';
+import { getBudgets } from '../db/features.js';
+import { Kpi } from '../components/planning/ui';
+import { money, moneyWhole, percent } from '../components/planning/shared';
 import {
   bootstrapSchema,
   deleteTransaction,
@@ -24,6 +27,8 @@ import {
 } from '../dbQueries.js';
 
 type FilterOption = 'Month to Date' | 'Last 3 Months' | 'Year to Date' | 'All Time' | 'Custom';
+
+type CategoryTotal = { category: string; total: number };
 
 type PacingTopTransaction = {
   id: number;
@@ -96,6 +101,7 @@ export default function Analytics() {
   const [pacingData, setPacingData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [comparisonMode, setComparisonMode] = useState<'previous-period' | 'previous-year'>('previous-period');
+  const [budgets, setBudgets] = useState<{ category: string; monthly_amount: number }[]>([]);
 
   // Expanded chart state
   const [expandedChart, setExpandedChart] = useState<'trend' | 'category' | 'spend-pacing' | null>(null);
@@ -338,6 +344,15 @@ export default function Analytics() {
     fetchData();
   }, [filter, customStartDate, customEndDate, refreshTrigger, comparisonMode, isValidCustomRange, db, isReady, dataVersion]);
 
+  useEffect(() => {
+    if (!isReady || !db) return undefined;
+    let cancelled = false;
+    getBudgets(db)
+      .then((rows) => { if (!cancelled) setBudgets(rows); })
+      .catch((err) => console.error('Failed to load budgets:', err));
+    return () => { cancelled = true; };
+  }, [db, isReady, dataVersion]);
+
   // Handle drilldown data fetching
   useEffect(() => {
     if (!selectedMonth || !db) return;
@@ -375,6 +390,14 @@ export default function Analytics() {
     setSelectedCategory(null);
   }, [filter]);
 
+  // Categories folded into "Other" in the breakdown chart (everything past the top 7).
+  // Joined into a string so the drilldown only refetches when the set actually changes.
+  const otherCategoriesKey = useMemo(() => {
+    const rows: CategoryTotal[] = categoryData?.categories || [];
+    const sorted = [...rows].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
+    return sorted.slice(7).map((d) => d.category).join('\u0000');
+  }, [categoryData]);
+
   // Handle category drilldown data fetching
   useEffect(() => {
     if (!selectedCategory || !db) return;
@@ -385,8 +408,7 @@ export default function Analytics() {
       try {
         let categories: string[] | undefined;
         if (selectedCategory === 'Other') {
-          const sortedData = [...(categoryData?.categories || [])].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-          const otherCats = sortedData.slice(7).map(d => d.category);
+          const otherCats = otherCategoriesKey ? otherCategoriesKey.split('\u0000') : [];
           if (otherCats.length > 0) {
             categories = otherCats;
           } else {
@@ -435,7 +457,7 @@ export default function Analytics() {
     };
 
     fetchCategoryTransactions();
-  }, [selectedCategory, filter, customStartDate, customEndDate, refreshTrigger, isValidCustomRange, db, dataVersion]);
+  }, [selectedCategory, filter, customStartDate, customEndDate, refreshTrigger, isValidCustomRange, db, dataVersion, otherCategoriesKey]);
 
   const handleToggleOverride = async (id: number, status: number | null) => {
     if (!db) return;
@@ -597,6 +619,42 @@ export default function Analytics() {
     };
   }, [pacingData, filter, comparisonMode]);
 
+  // Savings rate for the selected period: income left after net spending.
+  const periodTotals = useMemo(() => {
+    const income = trendData.reduce((sum, m) => sum + (Number(m.total_income) || 0), 0);
+    const spent = trendData.reduce((sum, m) => sum + (Number(m.net_expenses) || 0), 0);
+    return { income, spent, savingsRate: income > 0 ? (income - spent) / income : null };
+  }, [trendData]);
+
+  // How many months of budget the selected period covers.
+  const periodMonths = useMemo(() => {
+    const today = new Date();
+    const AVG_MONTH_DAYS = 365.25 / 12;
+    if (filter === 'Month to Date') return 1;
+    if (filter === 'Last 3 Months') return 3;
+    if (filter === 'Year to Date') return Math.max(1, (differenceInDays(today, startOfYear(today)) + 1) / AVG_MONTH_DAYS);
+    if (filter === 'Custom') {
+      if (!isValidCustomRange) return 1;
+      return Math.max(1, (differenceInDays(parseISO(customEndDate), parseISO(customStartDate)) + 1) / AVG_MONTH_DAYS);
+    }
+    return Math.max(1, trendData.length);
+  }, [filter, isValidCustomRange, customStartDate, customEndDate, trendData.length]);
+
+  const budgetChecks = useMemo(() => {
+    if (budgets.length === 0) return [];
+    const spentByCategory = new Map<string, number>(
+      ((categoryData?.categories || []) as CategoryTotal[]).map((c) => [c.category, Math.abs(Number(c.total) || 0)]),
+    );
+    return budgets
+      .map((b) => {
+        const limit = b.monthly_amount * periodMonths;
+        const spent = spentByCategory.get(b.category) ?? 0;
+        return { category: b.category, spent, limit, isOver: spent > limit, ratio: limit > 0 ? spent / limit : 0 };
+      })
+      .sort((a, b) => Number(b.isOver) - Number(a.isOver) || b.ratio - a.ratio);
+  }, [budgets, categoryData, periodMonths]);
+  const overBudgetCount = budgetChecks.filter((b) => b.isOver).length;
+
   return (
     <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
@@ -607,12 +665,12 @@ export default function Analytics() {
             <p className="text-xs text-gray-500 mt-2">Active DB: {dbName || 'In-memory database'}</p>
           </div>
 
-          <div className="inline-flex bg-gray-100 p-1 rounded-lg">
+          <div className="inline-flex flex-wrap bg-gray-100 p-1 rounded-lg">
             {(['Month to Date', 'Last 3 Months', 'Year to Date', 'All Time', 'Custom'] as FilterOption[]).map((opt) => (
               <button
                 key={opt}
                 onClick={() => setFilter(opt)}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${filter === opt
+                className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-md transition-colors ${filter === opt
                   ? 'bg-white text-gray-900 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
                   }`}
@@ -624,9 +682,9 @@ export default function Analytics() {
         </div>
 
         {filter !== 'All Time' && (
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-4">
             <span className="text-sm font-medium text-gray-700">Compare to:</span>
-            <div className="inline-flex bg-gray-100 p-1 rounded-lg gap-1">
+            <div className="inline-flex flex-wrap bg-gray-100 p-1 rounded-lg gap-1">
               <button
                 onClick={() => setComparisonMode('previous-period')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${comparisonMode === 'previous-period' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-800'}`}
@@ -670,6 +728,17 @@ export default function Analytics() {
           </div>
         </div>
       )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
+        <Kpi label="Income" value={isLoading ? '…' : moneyWhole(periodTotals.income)} />
+        <Kpi label="Net spending" value={isLoading ? '…' : moneyWhole(periodTotals.spent)} />
+        <Kpi
+          label="Savings rate"
+          value={isLoading ? '…' : percent(periodTotals.savingsRate)}
+          hint={!isLoading && periodTotals.income > 0 ? `${moneyWhole(periodTotals.income - periodTotals.spent)} saved` : (!isLoading ? 'No income in this period' : undefined)}
+          tone={isLoading || periodTotals.savingsRate === null ? 'neutral' : periodTotals.savingsRate < 0 ? 'bad' : periodTotals.savingsRate >= 0.2 ? 'good' : 'neutral'}
+        />
+      </div>
 
       {/* Temporal Analysis Section - Top Priority Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -770,7 +839,38 @@ export default function Analytics() {
             ) : (
               <CategoryBreakdownChart data={categoryData} onCategoryClick={setSelectedCategory} total_income={totalIncomeAmount} />
             )}
-          </div>        </div>      </div>
+          </div>
+          {!isLoading && budgetChecks.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <p className="text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                {overBudgetCount > 0 && <AlertTriangle className="h-4 w-4 text-red-600" aria-hidden="true" />}
+                {overBudgetCount > 0
+                  ? `${overBudgetCount} ${overBudgetCount === 1 ? 'category is' : 'categories are'} over budget`
+                  : 'All budgeted categories are within budget'}
+                {filter !== 'Month to Date' && (
+                  <span className="font-normal text-gray-500">({periodMonths.toFixed(periodMonths % 1 ? 1 : 0)} months of budget)</span>
+                )}
+              </p>
+              <ul className="flex flex-wrap gap-2">
+                {budgetChecks.map((b) => (
+                  <li key={b.category}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCategory(b.category)}
+                      className={`text-xs rounded-full px-2.5 py-1 border tabular-nums ${b.isOver
+                        ? 'bg-red-50 border-red-200 text-red-800 font-medium'
+                        : 'bg-gray-50 border-gray-200 text-gray-700'}`}
+                      title={`${b.category}: ${money(b.spent)} of ${money(b.limit)}`}
+                    >
+                      {b.category} · {money(b.spent)} / {moneyWhole(b.limit)}{b.isOver ? ' · over' : ''}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Drilldown Section */}
       {selectedMonth && (

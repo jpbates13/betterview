@@ -3,12 +3,20 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 const DriveSyncContext = createContext(null);
 const DRIVE_AUTH_STORAGE_KEY = 'betterview_drive_auth';
 
+// Kept in sessionStorage (this tab only, gone when it closes) rather than localStorage.
+const authStorage = () => window.sessionStorage;
+
 const clearStoredDriveAuth = () => {
-  localStorage.removeItem(DRIVE_AUTH_STORAGE_KEY);
+  try {
+    authStorage().removeItem(DRIVE_AUTH_STORAGE_KEY);
+    localStorage.removeItem(DRIVE_AUTH_STORAGE_KEY); // left by older versions
+  } catch {
+    // Ignore storage failures.
+  }
 };
 
 const persistDriveAuth = ({ access_token, expires_at }) => {
-  localStorage.setItem(
+  authStorage().setItem(
     DRIVE_AUTH_STORAGE_KEY,
     JSON.stringify({
       access_token,
@@ -23,7 +31,8 @@ export function DriveSyncProvider({ children }) {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(DRIVE_AUTH_STORAGE_KEY);
+      localStorage.removeItem(DRIVE_AUTH_STORAGE_KEY); // left by older versions
+      const raw = authStorage().getItem(DRIVE_AUTH_STORAGE_KEY);
       if (!raw) return;
 
       const parsed = JSON.parse(raw);

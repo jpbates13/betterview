@@ -1,179 +1,271 @@
-import { useState, useEffect, useRef } from 'react';
-import { CheckCircle, AlertCircle, RefreshCw, Plus, UploadCloud, LogOut, Sparkles, X } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { CheckCircle, AlertCircle, RefreshCw, Plus, UploadCloud, Sparkles, X } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
 import DataTable from '../components/DataTable';
 import TransactionModal from '../components/TransactionModal';
 import SplitTransactionModal from '../components/SplitTransactionModal';
+import CsvMappingModal from '../components/transactions/CsvMappingModal';
+import ImportResultsPanel from '../components/transactions/ImportResultsPanel';
+import BulkActionBar from '../components/transactions/BulkActionBar';
+import {
+  errorMessage,
+  type CsvProfile,
+  type DatabaseContextValue,
+  type ImportSummary,
+  type Transaction,
+} from '../components/transactions/types';
+import { getTransactions } from '../components/transactions/api';
 import { useDatabase } from '../DatabaseContext.jsx';
-import { useAutoSyncStatus } from '../useAutoSync.js';
 import {
   bootstrapSchema,
   createTransaction,
   deleteTransaction,
-  getTransactions,
   overrideTransaction,
   splitTransaction,
   undoSplitTransaction,
   updateTransaction,
 } from '../dbQueries.js';
-import { importCsvToDatabase } from '../csvImporter.js';
+import { CsvMappingRequiredError, importCsvToDatabase, saveCsvProfile, undoImportBatch } from '../csvImporter.js';
+import {
+  addTagToTransactions,
+  bulkDelete,
+  bulkSetCategory,
+  bulkSetOverride,
+  removeTagFromTransactions,
+} from '../db/features.js';
 
 const ONBOARDING_DISMISSED_KEY = 'betterview.onboarding.dismissed.v1';
 const ONBOARDING_COMPLETED_KEY = 'betterview.onboarding.completed.v1';
 
-export default function Dashboard() {
-  const { db, dbName, isReady, error: dbError, notifyDataChanged, lastMutationTime, triggerMutation } = useDatabase() as any;
-  const { syncStatus, logout } = useAutoSyncStatus() as any;
+type Alert = { type: 'success' | 'error'; message: string };
+type FormData = Pick<Transaction, 'date' | 'description' | 'amount' | 'category' | 'account'> & {
+  source_file?: string;
+  manual_override?: number | null;
+  tags: string[];
+};
+type MappingRequest = { file: File; headers: string[]; sampleRows: Array<Record<string, unknown>> };
 
-  const [transactions, setTransactions] = useState<any[]>([]);
+// bootstrapSchema has no guard against two overlapping runs on a fresh database (both try the
+// same ALTER TABLE), which React's dev double-mount triggers. Share one run per database here.
+const schemaReady = new WeakMap<object, Promise<void>>();
+const ensureSchema = (db: NonNullable<DatabaseContextValue['db']>) => {
+  let pending = schemaReady.get(db);
+  if (!pending) {
+    pending = Promise.resolve(bootstrapSchema(db)).catch((err) => {
+      schemaReady.delete(db);
+      throw err;
+    });
+    schemaReady.set(db, pending);
+  }
+  return pending;
+};
+
+const readFlag = (key: string) => {
+  try {
+    return window.localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const writeFlag = (key: string) => {
+  try {
+    window.localStorage.setItem(key, '1');
+  } catch {
+    // Ignore localStorage write failures.
+  }
+};
+
+// The merchant (or failing that, description) every selected row shares, else the first row's.
+const commonMatchValue = (rows: Transaction[]): string => {
+  const shared = (pick: (tx: Transaction) => string | null | undefined) => {
+    const values = new Set(rows.map((tx) => (pick(tx) || '').trim().toLowerCase()));
+    return values.size === 1 && !values.has('') ? (pick(rows[0]) || '').trim() : null;
+  };
+  return shared((tx) => tx.merchant) ?? shared((tx) => tx.description) ?? (rows[0]?.merchant || rows[0]?.description || '').trim();
+};
+
+export default function Dashboard() {
+  const { db, dbName, isReady, error: dbError, dataVersion, notifyDataChanged, triggerMutation } = useDatabase() as DatabaseContextValue;
+  const navigate = useNavigate();
+
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [isImportingCsv, setIsImportingCsv] = useState(false);
-  const [alert, setAlert] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const [alert, setAlert] = useState<Alert | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create');
-  const [selectedTx, setSelectedTx] = useState<any | null>(null);
+  const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
-  const [splitTx, setSplitTx] = useState<any | null>(null);
+  const [splitTx, setSplitTx] = useState<Transaction | null>(null);
   const [isDraggingCsv, setIsDraggingCsv] = useState(false);
-  const [isOnboardingDismissed, setIsOnboardingDismissed] = useState(false);
-  const [isOnboardingCompleted, setIsOnboardingCompleted] = useState(false);
+  const [isOnboardingDismissed, setIsOnboardingDismissed] = useState(() => readFlag(ONBOARDING_DISMISSED_KEY));
+  const [isOnboardingCompleted] = useState(() => readFlag(ONBOARDING_COMPLETED_KEY));
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+  const [batchFilter, setBatchFilter] = useState<string | null>(null);
+  const [mappingRequest, setMappingRequest] = useState<MappingRequest | null>(null);
 
-  useEffect(() => {
-    try {
-      setIsOnboardingDismissed(window.localStorage.getItem(ONBOARDING_DISMISSED_KEY) === '1');
-      setIsOnboardingCompleted(window.localStorage.getItem(ONBOARDING_COMPLETED_KEY) === '1');
-    } catch {
-      setIsOnboardingDismissed(false);
-      setIsOnboardingCompleted(false);
-    }
-  }, []);
-
+  // Once there's data, onboarding is done for good.
   useEffect(() => {
     if (transactions.length === 0) return;
-
-    setIsOnboardingCompleted(true);
-    setIsOnboardingDismissed(true);
-
-    try {
-      window.localStorage.setItem(ONBOARDING_COMPLETED_KEY, '1');
-      window.localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
-    } catch {
-      // Ignore localStorage write failures.
-    }
+    writeFlag(ONBOARDING_COMPLETED_KEY);
+    writeFlag(ONBOARDING_DISMISSED_KEY);
   }, [transactions.length]);
+
+  // Success messages fade on their own; errors stay until dismissed.
+  useEffect(() => {
+    if (alert?.type !== 'success') return;
+    const timer = window.setTimeout(() => setAlert(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [alert]);
 
   const dismissOnboarding = () => {
     setIsOnboardingDismissed(true);
-    try {
-      window.localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
-    } catch {
-      // Ignore localStorage write failures.
-    }
+    writeFlag(ONBOARDING_DISMISSED_KEY);
   };
 
-  const markMutation = () => {
+  // Every mutation bumps dataVersion, which refetches below, and schedules a Drive sync.
+  const markMutation = useCallback(() => {
     notifyDataChanged();
     triggerMutation();
-  };
-
-  const cloudSyncLabel = (() => {
-    if (!lastMutationTime) return 'Cloud Connected ✅';
-    if (syncStatus === 'pending') return 'Unsaved changes...';
-    if (syncStatus === 'syncing') return 'Saving to Drive...';
-    if (syncStatus === 'synced') return 'Cloud Synced ✅';
-    return 'Cloud Connected ✅';
-  })();
-
-  const shouldShowOnboarding = !isLoading && transactions.length === 0 && !isOnboardingCompleted && !isOnboardingDismissed;
-
-  const fetchTransactions = async () => {
-    if (!db) {
-      setTransactions([]);
-      setIsLoading(false);
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-      const rows = await getTransactions(db);
-      setTransactions(rows);
-    } catch (err) {
-      console.error(err);
-      setAlert({ type: 'error', message: 'Failed to read transactions from local database.' });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  }, [notifyDataChanged, triggerMutation]);
 
   useEffect(() => {
     if (!isReady || !db) return;
+    let cancelled = false;
 
-    const initializeDb = async () => {
+    (async () => {
       try {
-        await bootstrapSchema(db);
-        await fetchTransactions();
+        await ensureSchema(db);
+        const rows = await getTransactions(db, batchFilter ? { importBatchId: batchFilter } : undefined);
+        if (cancelled) return;
+        setTransactions(rows);
+        setLoadError(null);
       } catch (err) {
         console.error(err);
-        setAlert({ type: 'error', message: 'Failed to initialize local database schema.' });
-        setIsLoading(false);
+        if (!cancelled) setLoadError(errorMessage(err, 'Failed to read transactions from the local database.'));
+      } finally {
+        if (!cancelled) setIsLoading(false);
       }
+    })();
+
+    return () => {
+      cancelled = true;
     };
+  }, [db, isReady, dbName, dataVersion, batchFilter, refreshKey]);
 
-    initializeDb();
-  }, [db, isReady, dbName]);
+  const refresh = () => {
+    setIsLoading(true);
+    setRefreshKey((k) => k + 1);
+  };
 
-  useEffect(() => {
-    if (dbError) {
-      setAlert({ type: 'error', message: dbError });
-    }
-  }, [dbError]);
+  const shouldShowOnboarding = !isLoading && transactions.length === 0 && !batchFilter && !isOnboardingCompleted && !isOnboardingDismissed;
+  const visibleError = alert?.type === 'error' ? alert.message : null;
+  const pageError = dbError || loadError;
+
+  const categories = useMemo(
+    () => Array.from(new Set(transactions.map((tx) => tx.category).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [transactions],
+  );
+  const allTags = useMemo(
+    () => Array.from(new Set(transactions.flatMap((tx) => tx.tags || []))).sort(),
+    [transactions],
+  );
+
+  // ── CSV import ─────────────────────────────────────────────────────────────
+
+  const runImport = async (file: File, options?: { profile: CsvProfile }) => {
+    const summary = (await importCsvToDatabase(file, db, options)) as ImportSummary;
+    setImportSummary(summary);
+    setBatchFilter(null);
+    setAlert(null);
+    if (summary.inserted > 0) markMutation();
+  };
 
   const importCsvFile = async (file: File | null | undefined) => {
     if (!file) return;
 
-    const lowerName = file.name.toLowerCase();
-    if (!lowerName.endsWith('.csv')) {
+    if (!file.name.toLowerCase().endsWith('.csv')) {
       setAlert({ type: 'error', message: 'Please select a .csv file.' });
+      return;
+    }
+    if (!db) {
+      setAlert({ type: 'error', message: 'The local database is still loading. Try again in a moment.' });
       return;
     }
 
     try {
       setIsImportingCsv(true);
       setAlert(null);
-      const result = await importCsvToDatabase(file, db);
-      markMutation();
-      await fetchTransactions();
-      setAlert({
-        type: 'success',
-        message: `Imported ${result.inserted} transactions. Skipped ${result.duplicates} duplicates.`,
-      });
+      await runImport(file);
     } catch (err) {
-      console.error(err);
-      setAlert({ type: 'error', message: 'Failed to import Fidelity CSV.' });
+      if (err instanceof CsvMappingRequiredError) {
+        setMappingRequest({
+          file,
+          headers: err.headers as string[],
+          sampleRows: err.sampleRows as Array<Record<string, unknown>>,
+        });
+      } else {
+        console.error(err);
+        setAlert({ type: 'error', message: `Import failed: ${errorMessage(err, 'unknown error')}` });
+      }
     } finally {
       setIsImportingCsv(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
+  const handleMappingConfirm = async (profile: CsvProfile, saveProfile: boolean) => {
+    if (!mappingRequest || !db) return;
+    if (saveProfile) {
+      await saveCsvProfile(db, profile);
+      triggerMutation();
+    }
+    await runImport(mappingRequest.file, { profile });
+    setMappingRequest(null);
+  };
+
   const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    await importCsvFile(e.target.files?.[0]);
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    await importCsvFile(file);
   };
 
   const handleDropCsv = async (e: React.DragEvent<HTMLLabelElement>) => {
     e.preventDefault();
     setIsDraggingCsv(false);
-    const droppedFile = e.dataTransfer.files?.[0];
-    await importCsvFile(droppedFile);
+    await importCsvFile(e.dataTransfer.files?.[0]);
   };
+
+  const handleUndoImport = async () => {
+    if (!db || !importSummary) return;
+    const confirmed = window.confirm(
+      `Undo the import of ${importSummary.fileName}?\n\nThis removes the ${importSummary.inserted} transaction(s) it added, including any edits, tags and splits made to them since.`,
+    );
+    if (!confirmed) return;
+    try {
+      const removed = await undoImportBatch(db, importSummary.batchId);
+      setImportSummary(null);
+      setBatchFilter(null);
+      markMutation();
+      setAlert({ type: 'success', message: `Import undone. Removed ${removed} transaction(s).` });
+    } catch (err) {
+      console.error(err);
+      setAlert({ type: 'error', message: errorMessage(err, 'Failed to undo the import.') });
+    }
+  };
+
+  // ── Single-row actions ─────────────────────────────────────────────────────
 
   const handleToggleOverride = async (id: number, status: number | null) => {
     if (!db) return;
 
     try {
       await overrideTransaction(db, id, status);
-      setTransactions(prev => prev.map((tx: any) =>
+      setTransactions(prev => prev.map((tx) =>
         tx.id === id ? {
           ...tx,
           manual_override: status,
@@ -183,34 +275,32 @@ export default function Dashboard() {
       markMutation();
     } catch (err) {
       console.error(err);
-      setAlert({ type: 'error', message: 'Failed to update transaction manual override.' });
+      setAlert({ type: 'error', message: errorMessage(err, 'Failed to update transaction manual override.') });
     }
   };
 
-  const handleCreateOrUpdate = async (formData: any) => {
+  const handleCreateOrUpdate = async (formData: FormData) => {
     if (!db) {
       throw new Error('Load a local database first.');
     }
 
-    try {
-      if (modalMode === 'create') {
-        const payload = { ...formData, manual_override: 0 };
-        await createTransaction(db, payload);
-        setAlert({ type: 'success', message: 'Transaction created successfully.' });
-      } else {
-        const payload = { ...selectedTx, ...formData };
-        await updateTransaction(db, selectedTx.id, payload);
-        setAlert({ type: 'success', message: 'Transaction updated successfully.' });
-      }
-      markMutation();
-      await fetchTransactions();
-    } catch (err: any) {
-      console.error(err);
-      throw new Error(err?.message || 'Failed to save transaction.');
+    const { tags: _tags, ...fields } = formData;
+    void _tags; // Saved by the modal once the row exists.
+    let savedId: number | undefined;
+    if (modalMode === 'create') {
+      const result = await createTransaction(db, { ...fields, manual_override: 0 });
+      savedId = Number(result.id);
+      setAlert({ type: 'success', message: 'Transaction created successfully.' });
+    } else if (selectedTx) {
+      await updateTransaction(db, selectedTx.id, { ...selectedTx, ...fields });
+      savedId = selectedTx.id;
+      setAlert({ type: 'success', message: 'Transaction updated successfully.' });
     }
+    markMutation();
+    return { id: savedId };
   };
 
-  const openEditModal = (tx: any) => {
+  const openEditModal = (tx: Transaction) => {
     setSelectedTx(tx);
     setModalMode('edit');
     setIsModalOpen(true);
@@ -222,7 +312,7 @@ export default function Dashboard() {
     setIsModalOpen(true);
   };
 
-  const handleDeleteTransaction = async (tx: any) => {
+  const handleDeleteTransaction = async (tx: Transaction) => {
     if (!db) return;
 
     const confirmed = window.confirm(
@@ -232,19 +322,16 @@ export default function Dashboard() {
 
     try {
       await deleteTransaction(db, tx.id);
-      setTransactions(prev => prev.filter((row: any) => row.id !== tx.id));
+      setTransactions(prev => prev.filter((row) => row.id !== tx.id));
       markMutation();
       setAlert({ type: 'success', message: 'Transaction deleted successfully.' });
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      setAlert({
-        type: 'error',
-        message: err?.message || 'Failed to delete transaction.'
-      });
+      setAlert({ type: 'error', message: errorMessage(err, 'Failed to delete transaction.') });
     }
   };
 
-  const openSplitModal = (tx: any) => {
+  const openSplitModal = (tx: Transaction) => {
     setSplitTx(tx);
     setIsSplitModalOpen(true);
   };
@@ -255,14 +342,13 @@ export default function Dashboard() {
       await splitTransaction(db, splitTx.id, payload);
       setAlert({ type: 'success', message: 'Transaction split successfully.' });
       markMutation();
-      await fetchTransactions();
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      throw new Error(err?.message || 'Failed to split transaction.');
+      throw new Error(errorMessage(err, 'Failed to split transaction.'));
     }
   };
 
-  const handleUndoSplit = async (tx: any) => {
+  const handleUndoSplit = async (tx: Transaction) => {
     if (!db) return;
 
     const amountText = Math.abs(Number(tx.amount || 0)).toFixed(2);
@@ -275,21 +361,114 @@ export default function Dashboard() {
       await undoSplitTransaction(db, tx.id);
       setAlert({ type: 'success', message: 'Split transaction was successfully undone.' });
       markMutation();
-      await fetchTransactions();
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      setAlert({
-        type: 'error',
-        message: err?.message || 'Failed to undo split transaction.',
-      });
+      setAlert({ type: 'error', message: errorMessage(err, 'Failed to undo split transaction.') });
     }
   };
 
+  // ── Bulk actions ───────────────────────────────────────────────────────────
+
+  const runBulk = async (action: () => Promise<string>, fallbackError: string) => {
+    if (!db) return false;
+    try {
+      const message = await action();
+      markMutation();
+      setAlert({ type: 'success', message });
+      return true;
+    } catch (err) {
+      console.error(err);
+      setAlert({ type: 'error', message: errorMessage(err, fallbackError) });
+      return false;
+    }
+  };
+
+  const plural = (n: number) => `${n.toLocaleString()} transaction${n === 1 ? '' : 's'}`;
+
+  const renderBulkBar = (selected: Transaction[], clearSelection: () => void) => (
+    <BulkActionBar
+      selected={selected}
+      categories={categories}
+      allTags={allTags}
+      onClear={clearSelection}
+      onSetCategory={async (rows, category) => {
+        // Split halves stay in step with their original; they're skipped, not changed.
+        const editable = rows.filter((tx) => !tx.is_split);
+        if (editable.length === 0) {
+          setAlert({ type: 'error', message: 'Only split halves are selected. Undo the split before changing their category.' });
+          return;
+        }
+        await runBulk(async () => {
+          await bulkSetCategory(db, editable.map((tx) => tx.id), category);
+          const skipped = rows.length - editable.length;
+          return `Set ${plural(editable.length)} to "${category}".${skipped ? ` Skipped ${skipped} split half${skipped === 1 ? '' : 's'}.` : ''}`;
+        }, 'Failed to set the category.');
+      }}
+      onSetOverride={async (rows, status) => {
+        await runBulk(async () => {
+          await bulkSetOverride(db, rows.map((tx) => tx.id), status);
+          const verb = status === 1 ? 'Excluded' : status === 0 ? 'Included' : 'Reset to automatic';
+          return `${verb}: ${plural(rows.length)}.`;
+        }, 'Failed to update analytics inclusion.');
+      }}
+      onAddTag={async (rows, tag) => {
+        await runBulk(async () => {
+          await addTagToTransactions(db, rows.map((tx) => tx.id), tag);
+          return `Tagged ${plural(rows.length)}.`;
+        }, 'Failed to add the tag.');
+      }}
+      onRemoveTag={async (rows, tag) => {
+        await runBulk(async () => {
+          await removeTagFromTransactions(db, rows.map((tx) => tx.id), tag);
+          return `Removed #${tag} from the selection.`;
+        }, 'Failed to remove the tag.');
+      }}
+      onDelete={async (rows) => {
+        if (!window.confirm(`Delete ${plural(rows.length)}?\n\nThis action cannot be undone.`)) return;
+        const ok = await runBulk(async () => {
+          await bulkDelete(db, rows.map((tx) => tx.id));
+          return `Deleted ${plural(rows.length)}.`;
+        }, 'Failed to delete the selection.');
+        if (ok) clearSelection();
+      }}
+      onCreateRule={(rows, category) => {
+        const value = commonMatchValue(rows);
+        navigate('/rules', {
+          state: { ruleDraft: { name: value, column: 'merchant', value, category: category || '' } },
+        });
+      }}
+    />
+  );
+
+  const alertBanner = (message: Alert) => (
+    <div
+      role={message.type === 'error' ? 'alert' : 'status'}
+      className={`p-4 rounded-xl flex items-start shadow-sm animate-in fade-in slide-in-from-top-2 ${message.type === 'success'
+        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+        : 'bg-red-50 text-red-800 border border-red-200'
+        }`}
+    >
+      {message.type === 'success' ? (
+        <CheckCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-emerald-600" />
+      ) : (
+        <AlertCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-red-600" />
+      )}
+      <span className="font-medium text-sm sm:text-base leading-snug flex-1 min-w-0 break-words">{message.message}</span>
+      <button
+        onClick={() => setAlert(null)}
+        className="ml-2 p-1 rounded-md opacity-60 hover:opacity-100"
+        aria-label="Dismiss message"
+      >
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  );
+
   return (
-    <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="max-w-6xl mx-auto space-y-6 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
       {/* Header section */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-gray-100">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Transactions</h1>
           <p className="text-gray-500 mt-1">Manage and view all transactions from your local-first database.</p>
@@ -298,27 +477,12 @@ export default function Dashboard() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="inline-flex items-center justify-center px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-600 min-h-[40px]">
-            {syncStatus === 'syncing' && (
-              <span className="h-4 w-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin mr-2" />
-            )}
-            <span className="font-medium">{cloudSyncLabel}</span>
-          </div>
-
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <button
-            onClick={logout}
-            className="inline-flex items-center justify-center px-4 py-2 rounded-lg border font-medium transition-colors shadow-sm bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
-            title="Logout from Google Drive"
-          >
-            <LogOut className="h-4 w-4 mr-2" />
-            Logout
-          </button>
-
-          <button
-            onClick={fetchTransactions}
+            onClick={refresh}
             className="p-2.5 text-gray-500 hover:text-gray-900 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors border border-gray-200"
             title="Refresh transactions"
+            aria-label="Refresh transactions"
           >
             <RefreshCw className={`h-5 w-5 ${isLoading && !isImportingCsv ? 'animate-spin' : ''}`} />
           </button>
@@ -340,13 +504,13 @@ export default function Dashboard() {
             ) : (
               <UploadCloud className="h-4 w-4 mr-2" />
             )}
-            Upload FullView CSV
+            Import CSV
           </button>
 
           <button
             onClick={openCreateModal}
             disabled={!db}
-            className="inline-flex items-center justify-center px-5 py-2.5 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 hover:shadow-md transition-all disabled:opacity-75"
+            className="inline-flex items-center justify-center px-4 sm:px-5 py-2.5 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 hover:shadow-md transition-all disabled:opacity-75"
           >
             <Plus className="h-5 w-5 mr-2" />
             New Transaction
@@ -354,23 +518,33 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Alert Banner */}
-      {alert && (
-        <div className={`p-4 rounded-xl flex items-start shadow-sm animate-in fade-in slide-in-from-top-2 ${alert.type === 'success'
-          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-          : 'bg-red-50 text-red-800 border border-red-200'
-          }`}>
-          {alert.type === 'success' ? (
-            <CheckCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-emerald-600" />
-          ) : (
-            <AlertCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-red-600" />
-          )}
-          <span className="font-medium text-sm sm:text-base leading-snug">{alert.message}</span>
-        </div>
+      {pageError && pageError !== visibleError && alertBanner({ type: 'error', message: pageError })}
+
+      {/* Alert banner; pinned so bulk-action results are visible wherever the user has scrolled. */}
+      {alert && <div className="sticky top-2 z-40">{alertBanner(alert)}</div>}
+
+      {importSummary && (
+        <ImportResultsPanel
+          key={importSummary.batchId}
+          summary={importSummary}
+          isFilteringToBatch={batchFilter === importSummary.batchId}
+          onToggleFilter={() => {
+            setIsLoading(true);
+            setBatchFilter((current) => (current === importSummary.batchId ? null : importSummary.batchId));
+          }}
+          onUndo={handleUndoImport}
+          onDismiss={() => {
+            setImportSummary(null);
+            if (batchFilter) {
+              setIsLoading(true);
+              setBatchFilter(null);
+            }
+          }}
+        />
       )}
 
       {shouldShowOnboarding && (
-        <div className="relative overflow-hidden rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-emerald-50 p-6 shadow-sm">
+        <div className="relative overflow-hidden rounded-2xl border border-sky-200 bg-gradient-to-br from-sky-50 via-white to-emerald-50 p-4 sm:p-6 shadow-sm">
           <div className="absolute right-3 top-3">
             <button
               onClick={dismissOnboarding}
@@ -383,10 +557,10 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-start gap-4">
-            <div className="mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-sky-200 bg-white">
+            <div className="mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-sky-200 bg-white">
               <Sparkles className="h-5 w-5 text-sky-600" />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 pr-6">
               <h2 className="text-lg font-semibold text-gray-900">Welcome to BetterView</h2>
               <p className="mt-1 text-sm text-gray-700">
                 Your dashboard is ready. Next step: import your first CSV so your transactions and analytics can populate.
@@ -397,7 +571,7 @@ export default function Dashboard() {
           <div className="mt-5 grid gap-3 sm:grid-cols-3">
             <div className="rounded-xl border border-white/70 bg-white/80 p-4">
               <p className="text-xs font-semibold tracking-wide text-sky-700">STEP 1</p>
-              <p className="mt-1 text-sm text-gray-800">Upload a Fidelity FullView CSV from the Upload button or drag-and-drop zone below.</p>
+              <p className="mt-1 text-sm text-gray-800">Import a CSV from your bank or card (Fidelity is recognised automatically; other formats you map once).</p>
             </div>
             <div className="rounded-xl border border-white/70 bg-white/80 p-4">
               <p className="text-xs font-semibold tracking-wide text-sky-700">STEP 2</p>
@@ -429,20 +603,20 @@ export default function Dashboard() {
       )}
 
       <label
-        htmlFor="fidelity-csv-dropzone"
+        htmlFor="csv-dropzone"
         onDragOver={(e) => {
           e.preventDefault();
           setIsDraggingCsv(true);
         }}
         onDragLeave={() => setIsDraggingCsv(false)}
         onDrop={handleDropCsv}
-        className={`block border-2 border-dashed rounded-xl p-6 transition-colors cursor-pointer ${isDraggingCsv
+        className={`block border-2 border-dashed rounded-xl p-4 sm:p-6 transition-colors cursor-pointer ${isDraggingCsv
           ? 'border-primary-500 bg-primary-50'
           : 'border-gray-300 bg-white/70 hover:bg-white'
           }`}
       >
         <input
-          id="fidelity-csv-dropzone"
+          id="csv-dropzone"
           type="file"
           accept=".csv,text/csv"
           className="hidden"
@@ -450,7 +624,7 @@ export default function Dashboard() {
         />
         <div className="text-center">
           <UploadCloud className="h-8 w-8 text-gray-500 mx-auto mb-2" />
-          <p className="text-sm font-medium text-gray-800">Drag and drop a Fidelity CSV, or click to browse</p>
+          <p className="text-sm font-medium text-gray-800">Drag and drop a CSV, or click to browse</p>
           <p className="text-xs text-gray-500 mt-1">Overlapping uploads are deduplicated by date + description + amount.</p>
         </div>
       </label>
@@ -458,7 +632,7 @@ export default function Dashboard() {
       {/* Main Table Area */}
       <div className="space-y-4">
         <DataTable
-          title="Transactions"
+          title={batchFilter ? 'Transactions from this import' : 'Transactions'}
           data={transactions}
           isLoading={isLoading && transactions.length === 0}
           onToggleOverride={handleToggleOverride}
@@ -466,6 +640,8 @@ export default function Dashboard() {
           onSplit={openSplitModal}
           onUndoSplit={handleUndoSplit}
           onDelete={handleDeleteTransaction}
+          renderBulkBar={renderBulkBar}
+          emptyMessage={batchFilter ? 'Nothing from this import is left.' : undefined}
         />
       </div>
 
@@ -475,6 +651,7 @@ export default function Dashboard() {
         mode={modalMode}
         initialData={selectedTx}
         onSubmit={handleCreateOrUpdate}
+        categories={categories}
       />
 
       <SplitTransactionModal
@@ -483,6 +660,16 @@ export default function Dashboard() {
         onClose={() => setIsSplitModalOpen(false)}
         onSubmit={handleSplitTransaction}
       />
+
+      {mappingRequest && (
+        <CsvMappingModal
+          fileName={mappingRequest.file.name}
+          headers={mappingRequest.headers}
+          sampleRows={mappingRequest.sampleRows}
+          onCancel={() => setMappingRequest(null)}
+          onConfirm={handleMappingConfirm}
+        />
+      )}
     </div>
   );
 }

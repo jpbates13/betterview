@@ -1,12 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Pencil, Play, Plus, Sparkles, Trash2, X } from 'lucide-react';
-import { bootstrapSchema } from '../dbQueries.js';
+import { bootstrapSchema, previewRule } from '../dbQueries.js';
 import { useDatabase } from '../DatabaseContext.jsx';
+import RulePreviewPanel from '../components/rules/RulePreviewPanel.jsx';
+import RunRuleDialog from '../components/rules/RunRuleDialog.jsx';
+import { useRulePreview } from '../components/rules/useRulePreview.js';
+import {
+  buildPreviewRule,
+  buildRulePayload,
+  createCondition,
+  createEmptyRule,
+  createSplitLine,
+  editorStateFromDraft,
+} from '../components/rules/ruleForm.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const MATCH_COLUMNS = [
   { label: 'Description', value: 'description' },
+  { label: 'Merchant', value: 'merchant' },
   { label: 'Category', value: 'category' },
   { label: 'Account', value: 'account' },
   { label: 'Source File', value: 'source_file' },
@@ -31,30 +44,6 @@ const SPLIT_TYPES = [
   { label: 'Percentage (%)', value: 'percentage' },
   { label: 'Remainder', value: 'remainder' },
 ];
-
-// ── Factory helpers ──────────────────────────────────────────────────────────
-
-const createCondition = () => ({
-  column: 'description',
-  operator: 'contains',
-  value: '',
-});
-
-const createSplitLine = () => ({
-  category: '',
-  description: '',
-  type: 'fixed',
-  value: 0,
-});
-
-const createEmptyRule = () => ({
-  id: null,
-  name: '',
-  priority: 0,
-  action_type: 'categorize',
-  action_payload: '',
-  is_active: true,
-});
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
@@ -152,6 +141,7 @@ export default function RulesDashboard() {
     db,
     dbName,
     isReady,
+    dataVersion,
     triggerMutation,
     notifyDataChanged,
     getRules,
@@ -162,6 +152,9 @@ export default function RulesDashboard() {
     getAnalyticsSettingsConfig,
     updateAnalyticsSettingsConfig,
   } = useDatabase();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const editorRef = useRef(null);
 
   const [rules, setRules] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -169,19 +162,50 @@ export default function RulesDashboard() {
   const [editingRuleId, setEditingRuleId] = useState(null);
 
   // Form state
-  const [form, setForm] = useState(createEmptyRule());
+  const [form, setForm] = useState(createEmptyRule);
   const [matchType, setMatchType] = useState('all'); // 'all' (AND) | 'any' (OR)
-  const [conditions, setConditions] = useState([createCondition()]);
-  const [splitLines, setSplitLines] = useState([createSplitLine(), createSplitLine()]);
+  const [conditions, setConditions] = useState(() => [createCondition()]);
+  const [splitLines, setSplitLines] = useState(() => [createSplitLine(), createSplitLine()]);
+  const [isPrefilled, setIsPrefilled] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runningRuleId, setRunningRuleId] = useState(null);
+  const [runDialog, setRunDialog] = useState(null); // { rule, matchCount, changeCount, error }
+  const runRequestRef = useRef(0);
   const [settingsForm, setSettingsForm] = useState({
     excludedCategoryKeywords: '',
     excludedDescriptionKeywords: '',
     reimbursementExcludedCategories: '',
   });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+
+  // ── Prefill from the Transactions page (location.state.ruleDraft) ─────────
+
+  const ruleDraft = location.state?.ruleDraft;
+  const [seenDraft, setSeenDraft] = useState(null);
+  if (ruleDraft && ruleDraft !== seenDraft) {
+    // Adjusting state during render: load the draft once per navigation.
+    setSeenDraft(ruleDraft);
+    const draftState = editorStateFromDraft(ruleDraft);
+    if (draftState) {
+      setEditingRuleId(null);
+      setForm(draftState.form);
+      setMatchType(draftState.matchType);
+      setConditions(draftState.conditions);
+      setSplitLines(draftState.splitLines);
+      setIsPrefilled(true);
+    }
+  }
+
+  useEffect(() => {
+    if (!ruleDraft) return;
+    // Drop the draft from history so a refresh doesn't reopen it.
+    navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null });
+  }, [ruleDraft, navigate, location.pathname, location.search, location.hash]);
+
+  useEffect(() => {
+    if (isPrefilled) editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [isPrefilled]);
 
   // ── Split validation metrics ───────────────────────────────────────────────
 
@@ -200,9 +224,17 @@ export default function RulesDashboard() {
     [splitLines],
   );
 
+  // ── Live preview of the rule being edited ─────────────────────────────────
+
+  const previewDraft = useMemo(
+    () => buildPreviewRule({ form, matchType, conditions, splitLines }),
+    [form, matchType, conditions, splitLines],
+  );
+  const preview = useRulePreview(isReady ? db : null, previewDraft, { refreshToken: dataVersion });
+
   // ── Data loaders ──────────────────────────────────────────────────────────
 
-  const loadRules = async () => {
+  const loadRules = useCallback(async () => {
     if (!db) { setRules([]); setIsLoading(false); return; }
     try {
       setIsLoading(true);
@@ -213,9 +245,9 @@ export default function RulesDashboard() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [db, getRules]);
 
-  const loadAnalyticsSettings = async () => {
+  const loadAnalyticsSettings = useCallback(async () => {
     if (!db) return;
     try {
       const config = await getAnalyticsSettingsConfig();
@@ -229,7 +261,7 @@ export default function RulesDashboard() {
       console.error(error);
       setAlert({ type: 'error', message: 'Failed to load analytics defaults.' });
     }
-  };
+  }, [db, getAnalyticsSettingsConfig]);
 
   useEffect(() => {
     if (!isReady || !db) return;
@@ -245,7 +277,7 @@ export default function RulesDashboard() {
       }
     };
     initialize();
-  }, [db, isReady, dbName]);
+  }, [db, isReady, dbName, loadRules, loadAnalyticsSettings]);
 
   // ── Settings handlers ─────────────────────────────────────────────────────
 
@@ -282,9 +314,11 @@ export default function RulesDashboard() {
     setMatchType('all');
     setConditions([createCondition()]);
     setSplitLines([createSplitLine(), createSplitLine()]);
+    setIsPrefilled(false);
   };
 
   const editRule = (rule) => {
+    setIsPrefilled(false);
     setEditingRuleId(rule.id);
     setForm({
       id: rule.id,
@@ -308,6 +342,7 @@ export default function RulesDashboard() {
       }]);
     }
     setSplitLines(safeParseSplitPayload(rule.action_payload));
+    editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const handleFieldChange = (event) => {
@@ -370,89 +405,11 @@ export default function RulesDashboard() {
   const handleSubmit = async (event) => {
     event.preventDefault();
 
-    if (!form.name.trim()) {
-      setAlert({ type: 'error', message: 'Please provide a rule name.' });
+    const { payload, error: validationError } = buildRulePayload({ form, matchType, conditions, splitLines });
+    if (validationError) {
+      setAlert({ type: 'error', message: validationError });
       return;
     }
-
-    // Validate conditions
-    if (conditions.some((c) => !String(c.value || '').trim())) {
-      setAlert({ type: 'error', message: 'Every condition must have a value.' });
-      return;
-    }
-
-    // Build match_payload with V2.5 envelope
-    const matchPayload = JSON.stringify({
-      match_type: matchType,
-      conditions: conditions.map((c) => ({
-        column: c.column,
-        operator: c.operator,
-        value: String(c.value).trim(),
-      })),
-    });
-
-    // Build action_payload
-    let actionPayload = form.action_payload.trim();
-
-    if (form.action_type === 'categorize') {
-      if (!actionPayload) {
-        setAlert({ type: 'error', message: 'Categorize rules require a target category.' });
-        return;
-      }
-    } else {
-      // Split validation
-      if (splitLines.length < 2) {
-        setAlert({ type: 'error', message: 'Split rules need at least two lines.' });
-        return;
-      }
-
-      if (splitLines.some((l) => !l.category.trim())) {
-        setAlert({ type: 'error', message: 'Each split line needs a category.' });
-        return;
-      }
-
-      if (remainderCount > 1) {
-        setAlert({ type: 'error', message: 'A split rule may only have one Remainder line.' });
-        return;
-      }
-
-      if (totalPercentage > 100) {
-        setAlert({ type: 'error', message: `Percentages must not exceed 100%. Current total: ${totalPercentage}%.` });
-        return;
-      }
-
-      const hasNonZeroFixed = splitLines
-        .filter((l) => l.type === 'fixed')
-        .every((l) => Math.abs(Number(l.value || 0)) >= 0.005);
-
-      if (!hasNonZeroFixed) {
-        setAlert({ type: 'error', message: 'Fixed split amounts must be non-zero.' });
-        return;
-      }
-
-      const normalizedSplits = splitLines.map((line) => ({
-        category: String(line.category || '').trim(),
-        description: String(line.description || '').trim(),
-        type: line.type,
-        value: Number(line.value || 0),
-      }));
-
-      actionPayload = JSON.stringify({ splits: normalizedSplits });
-    }
-
-    const payload = {
-      ...form,
-      name: form.name.trim(),
-      // Persist V2 compound conditions
-      match_payload: matchPayload,
-      // Also keep V1 legacy fields from the first condition for backward compat
-      match_column: conditions[0]?.column || 'description',
-      match_operator: conditions[0]?.operator || 'contains',
-      match_value: String(conditions[0]?.value || '').trim(),
-      action_payload: actionPayload,
-      priority: Number(form.priority || 0),
-      is_active: Boolean(form.is_active),
-    };
 
     try {
       setIsSubmitting(true);
@@ -493,6 +450,27 @@ export default function RulesDashboard() {
     }
   };
 
+  const openRunDialog = async (rule) => {
+    if (!db) return;
+    const requestId = runRequestRef.current + 1;
+    runRequestRef.current = requestId;
+    setRunDialog({ rule, matchCount: null, changeCount: null, error: null });
+    try {
+      const rows = await previewRule(db, rule);
+      if (runRequestRef.current !== requestId) return;
+      const changeCount = rows.filter((row) => row.change !== 'already in category').length;
+      setRunDialog({ rule, matchCount: rows.length, changeCount, error: null });
+    } catch (error) {
+      if (runRequestRef.current !== requestId) return;
+      setRunDialog({ rule, matchCount: null, changeCount: null, error: error?.message || 'Could not preview this rule.' });
+    }
+  };
+
+  const closeRunDialog = useCallback(() => {
+    runRequestRef.current += 1;
+    setRunDialog(null);
+  }, []);
+
   const handleRunRule = async (rule) => {
     if (!db) return;
     try {
@@ -504,14 +482,15 @@ export default function RulesDashboard() {
       setAlert({
         type: 'success',
         message: affectedRows > 0
-          ? `Applied "${rule.name}" to ${affectedRows} historical row${affectedRows === 1 ? '' : 's'}.`
-          : `Rule "${rule.name}" matched no historical rows.`,
+          ? `Applied "${rule.name}" to ${affectedRows} existing row${affectedRows === 1 ? '' : 's'}.`
+          : `Rule "${rule.name}" matched no existing transactions.`,
       });
     } catch (error) {
       console.error(error);
       setAlert({ type: 'error', message: error?.message || 'Failed to run rule on existing data.' });
     } finally {
       setRunningRuleId(null);
+      closeRunDialog();
     }
   };
 
@@ -532,9 +511,9 @@ export default function RulesDashboard() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="max-w-7xl mx-auto space-y-6 sm:space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-gray-100">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Rules Engine</h1>
           <p className="text-gray-500 mt-1">Auto-categorize and auto-split transactions before import, or sweep existing data on demand.</p>
@@ -563,11 +542,11 @@ export default function RulesDashboard() {
 
       {/* Analytics Settings */}
       <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60">
+        <div className="px-4 sm:px-6 py-4 border-b border-gray-100 bg-gray-50/60">
           <h2 className="text-lg font-semibold text-gray-900">Analytics defaults</h2>
           <p className="text-sm text-gray-500 mt-1">Comma-separated keywords and categories used for exclusion and reimbursement math.</p>
         </div>
-        <form onSubmit={handleSaveAnalyticsSettings} className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-4 items-end">
+        <form onSubmit={handleSaveAnalyticsSettings} className="p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-3 gap-4 items-end">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Excluded category keywords</label>
             <input
@@ -613,27 +592,33 @@ export default function RulesDashboard() {
         </form>
       </section>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] gap-8 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] gap-6 sm:gap-8 items-start">
         {/* ── Create / Edit Rule Form ────────────────────────────────────────── */}
-        <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Create or edit rule</h2>
-              <p className="text-sm text-gray-500 mt-1">Rules are ordered by priority from low to high.</p>
+        <section ref={editorRef} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden scroll-mt-4">
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-gray-900">
+                {editingRuleId !== null ? 'Edit rule' : 'Create or edit rule'}
+              </h2>
+              <p className="text-sm text-gray-500 mt-1">
+                {isPrefilled
+                  ? 'Prefilled from a transaction. Check the matches below, then save.'
+                  : 'Rules are ordered by priority from low to high.'}
+              </p>
             </div>
-            {editingRuleId !== null && (
+            {(editingRuleId !== null || isPrefilled) && (
               <button
                 type="button"
                 onClick={resetForm}
                 className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
               >
                 <X className="h-4 w-4" />
-                Cancel edit
+                {editingRuleId !== null ? 'Cancel edit' : 'Discard'}
               </button>
             )}
           </div>
 
-          <form onSubmit={handleSubmit} className="p-6 space-y-5">
+          <form onSubmit={handleSubmit} className="p-4 sm:p-6 space-y-5">
             {/* Name + Priority */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -662,7 +647,7 @@ export default function RulesDashboard() {
 
             {/* ── Compound Conditions ─────────────────────────────────────── */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-semibold text-gray-900">Match conditions</h3>
                   <p className="text-xs text-gray-500 mt-0.5">Define when this rule should trigger.</p>
@@ -678,12 +663,13 @@ export default function RulesDashboard() {
               </div>
 
               {/* Match Requirement toggle */}
-              <div className="flex items-center gap-3 p-3 rounded-xl border border-indigo-100 bg-indigo-50/40">
-                <label className="text-xs font-semibold text-indigo-700 whitespace-nowrap">Match Requirement</label>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 p-3 rounded-xl border border-indigo-100 bg-indigo-50/40">
+                <label htmlFor="rule-match-type" className="text-xs font-semibold text-indigo-700 whitespace-nowrap">Match Requirement</label>
                 <select
+                  id="rule-match-type"
                   value={matchType}
                   onChange={(e) => setMatchType(e.target.value)}
-                  className="flex-1 px-3 py-1.5 border border-indigo-200 rounded-lg text-sm text-indigo-900 bg-white focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none transition-all"
+                  className="w-full sm:flex-1 min-w-0 px-3 py-1.5 border border-indigo-200 rounded-lg text-sm text-indigo-900 bg-white focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none transition-all"
                 >
                   <option value="all">Match ALL of the following conditions (AND)</option>
                   <option value="any">Match ANY of the following conditions (OR)</option>
@@ -740,12 +726,12 @@ export default function RulesDashboard() {
                           type="text"
                           value={condition.value}
                           onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
-                          placeholder="Amazon"
+                          placeholder={condition.column === 'merchant' ? 'Blue Bottle Coffee' : condition.column === 'amount' ? '-100' : 'Amazon'}
                           className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
                         />
                       </div>
                       {/* Remove */}
-                      <div className="md:col-span-1 flex md:justify-end">
+                      <div className="md:col-span-1 flex justify-end">
                         <button
                           type="button"
                           onClick={() => removeCondition(index)}
@@ -795,7 +781,7 @@ export default function RulesDashboard() {
             ) : (
               /* ── Dynamic Split Payload ───────────────────────────────── */
               <div className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900">Split payload</h3>
                     <p className="text-xs text-gray-500 mt-1">Define splits using fixed amounts, percentages, or a remainder.</p>
@@ -855,7 +841,7 @@ export default function RulesDashboard() {
                           />
                         </div>
                         {/* Remove */}
-                        <div className="md:col-span-1 flex md:justify-end">
+                        <div className="md:col-span-1 flex justify-end">
                           <button
                             type="button"
                             onClick={() => removeSplitLine(index)}
@@ -894,6 +880,9 @@ export default function RulesDashboard() {
               </div>
             )}
 
+            {/* Live preview against existing transactions */}
+            <RulePreviewPanel preview={preview} />
+
             {/* Active toggle */}
             <label className="inline-flex items-center gap-2 text-sm text-gray-700 select-none">
               <input
@@ -928,8 +917,8 @@ export default function RulesDashboard() {
 
         {/* ── Existing Rules ─────────────────────────────────────────────────── */}
         <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between gap-3">
-            <div>
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
               <h2 className="text-lg font-semibold text-gray-900">Existing rules</h2>
               <p className="text-sm text-gray-500 mt-1">Edit, delete, or run any rule against historical transactions.</p>
             </div>
@@ -942,7 +931,7 @@ export default function RulesDashboard() {
             </button>
           </div>
 
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             {isLoading ? (
               <div className="flex items-center justify-center py-16 text-gray-500">
                 <div className="h-6 w-6 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin mr-3" />
@@ -963,7 +952,7 @@ export default function RulesDashboard() {
                       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-base font-semibold text-gray-900">{rule.name}</h3>
+                            <h3 className="text-base font-semibold text-gray-900 break-words min-w-0">{rule.name}</h3>
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${rule.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
                               {rule.is_active ? 'Active' : 'Inactive'}
                             </span>
@@ -982,14 +971,14 @@ export default function RulesDashboard() {
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
                           <button
                             type="button"
-                            onClick={() => handleRunRule(rule)}
-                            disabled={isRunning}
+                            onClick={() => openRunDialog(rule)}
+                            disabled={isRunning || runDialog !== null}
                             className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-75"
                           >
                             {isRunning
                               ? <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                               : <Play className="h-4 w-4" />}
-                            Run on Existing Data
+                            Run on existing transactions
                           </button>
                           <button
                             type="button"
@@ -1017,6 +1006,18 @@ export default function RulesDashboard() {
           </div>
         </section>
       </div>
+
+      {runDialog && (
+        <RunRuleDialog
+          rule={runDialog.rule}
+          matchCount={runDialog.matchCount}
+          changeCount={runDialog.changeCount}
+          error={runDialog.error}
+          isRunning={runningRuleId === runDialog.rule.id}
+          onConfirm={() => handleRunRule(runDialog.rule)}
+          onCancel={closeRunDialog}
+        />
+      )}
     </div>
   );
 }

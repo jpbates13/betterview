@@ -341,15 +341,22 @@ const parseSplitDefinitions = (actionPayload, parentAmount) => {
   });
 };
 
+// Rows saved before merchant names existed (or rows not yet cleaned) fall back to
+// the automatic cleanup so merchant conditions behave the same everywhere.
+const conditionFieldValue = (transaction, column) => {
+  if (column !== 'merchant') return transaction?.[column];
+  return normalizeText(transaction?.merchant) || resolveMerchant(transaction?.description);
+};
+
 const evaluateCondition = (transaction, condition) => {
-  const column = normalizeText(condition?.column);
+  const column = normalizeLower(condition?.column);
   if (!column) return false;
 
   const operator = normalizeRuleMatchOperator(condition?.operator);
 
   // Numeric operators
   if (operator === 'greater_than' || operator === 'less_than') {
-    const txVal = toNumber(transaction?.[column], NaN);
+    const txVal = toNumber(conditionFieldValue(transaction, column), NaN);
     const condVal = toNumber(condition?.value, NaN);
     if (!Number.isFinite(txVal) || !Number.isFinite(condVal)) return false;
     return operator === 'greater_than' ? txVal > condVal : txVal < condVal;
@@ -358,7 +365,7 @@ const evaluateCondition = (transaction, condition) => {
   // Text operators
   const needle = normalizeLower(condition?.value);
   if (!needle) return false;
-  const haystack = normalizeLower(transaction?.[column]);
+  const haystack = normalizeLower(conditionFieldValue(transaction, column));
 
   if (operator === 'contains') return haystack.includes(needle);
   if (operator === 'equals') return haystack === needle;
@@ -622,10 +629,22 @@ const ensureSupportTables = async (db) => {
 // Databases whose schema is already bootstrapped. DatabaseContext creates a new api
 // object for every database it loads, so a reload starts unbootstrapped again.
 const bootstrappedDbs = new WeakSet();
+const bootstrapsInFlight = new WeakMap();
 const settingsCache = new WeakMap();
 
-export async function bootstrapSchema(db) {
-  if (bootstrappedDbs.has(db)) return;
+// Overlapping callers (two pages mounting, StrictMode) share one run, since the
+// ALTER TABLE migrations fail if they run twice.
+export function bootstrapSchema(db) {
+  if (bootstrappedDbs.has(db)) return Promise.resolve();
+  let run = bootstrapsInFlight.get(db);
+  if (!run) {
+    run = runBootstrap(db).finally(() => bootstrapsInFlight.delete(db));
+    bootstrapsInFlight.set(db, run);
+  }
+  return run;
+}
+
+async function runBootstrap(db) {
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS transactions (
@@ -887,6 +906,13 @@ export async function updateTransaction(db, transactionId, tx) {
   const amount = toNumber(tx.amount);
   const dedupeSeq = await nextDedupeSeq(db, tx.date, tx.description, amount, transactionId);
 
+  // A hand-picked category no longer comes from the rule that set it.
+  await db.exec(
+    `UPDATE transactions
+     SET applied_rule_id = CASE WHEN category IS ? THEN applied_rule_id ELSE NULL END
+     WHERE id = ?;`,
+    binds(tx.category, transactionId),
+  );
   await db.exec(
     `UPDATE transactions
      SET date = ?, description = ?, amount = ?, account = ?, category = ?, source_file = ?,
@@ -1126,7 +1152,8 @@ export async function previewRule(db, rule) {
     ...toTransaction(row),
     change: actionType === 'split'
       ? splits.map((line) => `${line.category} ${line.amount.toFixed(2)}`).join(' + ')
-      : row.category === target ? 'already in category' : `${row.category} → ${target}`,
+      : !target ? 'no target category yet'
+        : row.category === target ? 'already in category' : `${row.category || 'Uncategorized'} → ${target}`,
   }));
 }
 
@@ -1141,6 +1168,7 @@ export async function executeRuleOnDatabase(db, rule) {
   });
   const ruleId = Number.isFinite(normalizedRule.id) ? normalizedRule.id : null;
 
+  await bootstrapSchema(db);
   const matches = await findRuleMatches(db, normalizedRule);
   if (matches.length === 0) {
     return 0;
