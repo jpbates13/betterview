@@ -227,19 +227,48 @@ export async function suggestReimbursementLinks(db, creditId, { days = 120, limi
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-// Positive rows not yet linked to anything, as candidates for linking.
-export async function getUnlinkedCredits(db, { aroundDate, days = 60 } = {}) {
+// Transactions a reimbursement link could point at, for picking one by hand: expenses
+// (side 'expense') or credits not yet linked (side 'credit'), from any date. The query
+// matches the description, merchant or category, or an amount ("42.50", "$1,200");
+// results come nearest to `nearDate` first.
+export async function searchLinkCandidates(db, { side, query = '', nearDate, excludeId = null, limit = 20 } = {}) {
+  const where = ['is_hidden = 0', side === 'credit' ? 'amount > 0 AND reimburses_id IS NULL' : 'amount < 0'];
   const params = [];
-  let dateSql = '';
-  if (aroundDate) {
-    dateSql = "AND date BETWEEN date(?, ?) AND date(?, ?)";
-    params.push(aroundDate, `-${days} days`, aroundDate, `+${days} days`);
+  if (excludeId !== null) {
+    where.push('id <> ?');
+    params.push(excludeId);
   }
-  return queryRows(db, `
-    SELECT id, date, description, amount, category FROM transactions
-    WHERE is_hidden = 0 AND amount > 0 AND reimburses_id IS NULL AND LOWER(COALESCE(category, '')) <> 'income' ${dateSql}
-    ORDER BY date DESC LIMIT 200;
-  `, params);
+  const text = normalizeText(query).toLowerCase();
+  if (text) {
+    const textMatch = "(LOWER(description) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(merchant, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(category, '')) LIKE ? ESCAPE '\\')";
+    const like = `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const amount = Number(text.replace(/[$,\s+-]/g, ''));
+    if (/\d/.test(text) && Number.isFinite(amount) && amount > 0) {
+      where.push(`(${textMatch} OR ABS(ABS(amount) - ?) < 0.005)`);
+      params.push(like, like, like, amount);
+    } else {
+      where.push(textMatch);
+      params.push(like, like, like);
+    }
+  }
+  // Card payments and transfers can still be picked, but real spending comes first.
+  const { reimbursementExcludedCategoriesSql } = await getAnalyticsSql(db);
+  const rows = await queryRows(db, `
+    SELECT id, date, description, amount, category,
+           COALESCE((SELECT SUM(r.amount) FROM transactions r WHERE r.reimburses_id = t.id AND r.is_hidden = 0), 0) AS repaid
+    FROM transactions t
+    WHERE ${where.join(' AND ')}
+    ORDER BY LOWER(COALESCE(category, '')) IN ${reimbursementExcludedCategoriesSql}, ABS(julianday(date) - julianday(?)), id DESC
+    LIMIT ?;
+  `, binds(...params, nearDate ?? new Date().toISOString().slice(0, 10), limit));
+  return rows.map((row) => ({
+    id: Number(row.id),
+    date: row.date,
+    description: row.description,
+    amount: toNumber(row.amount),
+    category: row.category,
+    repaid: round2(row.repaid),
+  }));
 }
 
 // ── Budgets ──────────────────────────────────────────────────────────────────

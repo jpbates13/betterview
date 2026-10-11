@@ -12,7 +12,6 @@ import type {
   ReimbursementStatus,
   TagSummary,
   Transaction,
-  UnlinkedCredit,
   YearSummary,
 } from '../types';
 
@@ -30,7 +29,18 @@ export const REIMBURSABLE_TAG: 'reimbursable';
 export function linkReimbursement(db: DbApi, reimbursementId: number, expenseId: number | null): Promise<void>;
 export function getReimbursementStatus(db: DbApi): Promise<ReimbursementStatus[]>;
 export function getLinkedReimbursements(db: DbApi, expenseId: number): Promise<CreditRow[]>;
-export function getUnlinkedCredits(db: DbApi, options?: { aroundDate?: string; days?: number }): Promise<UnlinkedCredit[]>;
+export interface LinkCandidate {
+  id: number;
+  date: string;
+  description: string;
+  amount: number;
+  category: string | null;
+  repaid: number;
+}
+export function searchLinkCandidates(
+  db: DbApi,
+  options: { side: 'expense' | 'credit'; query?: string; nearDate?: string; excludeId?: number | null; limit?: number },
+): Promise<LinkCandidate[]>;
 
 export function getBudgets(db: DbApi): Promise<Budget[]>;
 export function setBudget(db: DbApi, category: string, monthlyAmount: number | string): Promise<void>;

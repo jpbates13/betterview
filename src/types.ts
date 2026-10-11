@@ -366,10 +366,6 @@ export interface CreditRow {
   amount: number;
 }
 
-export interface UnlinkedCredit extends CreditRow {
-  category: string | null;
-}
-
 export interface ReimbursementStatus extends CreditRow {
   category: string;
   repaid: number;

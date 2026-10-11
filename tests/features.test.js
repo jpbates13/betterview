@@ -251,3 +251,34 @@ describe('reimbursements received in a later month', () => {
     expect((await f.suggestReimbursementLinks(db, another)).some((s) => s.id === hotel)).toBe(false);
   });
 });
+
+describe('picking a reimbursement link by hand', () => {
+  it('finds expenses from any date by name, category or amount, nearest first', async () => {
+    const db = await freshDb();
+    const { id: old } = await tx(db, '2025-01-10', 'CONCERT TICKETS', -240, 'Entertainment');
+    const { id: recent } = await tx(db, '2026-05-01', 'GROCER', -42.5);
+    await tx(db, '2026-05-03', 'PAYROLL', 2000, 'Income');
+    const { id: credit } = await tx(db, '2026-05-20', 'VENMO CASHOUT', 120, 'Income');
+
+    const search = (query) => f.searchLinkCandidates(db, { side: 'expense', query, nearDate: '2026-05-20', excludeId: credit });
+    expect((await search('')).map((row) => row.id)).toEqual([recent, old]);
+    expect((await search('concert')).map((row) => row.id)).toEqual([old]);
+    expect((await search('entertain')).map((row) => row.id)).toEqual([old]);
+    expect((await search('$42.50')).map((row) => row.id)).toEqual([recent]);
+    expect(await search('100%')).toEqual([]);
+
+    await f.linkReimbursement(db, credit, old);
+    const [match] = await search('concert');
+    expect(match.repaid).toBe(120);
+  });
+
+  it('lists only credits that are not linked yet', async () => {
+    const db = await freshDb();
+    const { id: expense } = await tx(db, '2026-05-01', 'DINNER', -90);
+    const { id: linked } = await tx(db, '2026-05-02', 'VENMO FROM SAM', 30, 'Income');
+    const { id: open } = await tx(db, '2026-05-03', 'VENMO FROM ALEX', 30, 'Income');
+    await f.linkReimbursement(db, linked, expense);
+    const rows = await f.searchLinkCandidates(db, { side: 'credit', query: 'venmo', nearDate: '2026-05-01', excludeId: expense });
+    expect(rows.map((row) => row.id)).toEqual([open]);
+  });
+});
