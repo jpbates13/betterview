@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
 import { Home, PieChart, SlidersHorizontal, UploadCloud, LogOut } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import { useDriveSync } from '../DriveSyncContext.jsx';
+import { useAutoSyncStatus } from '../useAutoSync.js';
 
 export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
-  const { clearAccessToken } = useDriveSync() as any;
+  const { logout } = useAutoSyncStatus() as any;
 
   const navItems = [
     { name: 'Transactions', path: '/', icon: Home },
@@ -45,7 +45,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         </nav>
         <div className="p-4 border-t border-gray-200">
           <button
-            onClick={clearAccessToken}
+            onClick={logout}
             className="flex items-center w-full px-4 py-2 text-gray-600 hover:bg-gray-100 hover:text-gray-900 rounded-lg transition-colors"
           >
             <LogOut className="h-5 w-5 mr-3" />

@@ -90,8 +90,8 @@ const parseArraySettingValue = (rawValue, fallback) => {
 
   try {
     const parsed = JSON.parse(String(rawValue ?? ''));
-    const normalized = normalizeStringList(parsed);
-    return normalized.length > 0 ? normalized : parsedFallback;
+    // A saved empty list means the user cleared it on purpose; only fall back when unreadable.
+    return Array.isArray(parsed) ? normalizeStringList(parsed) : parsedFallback;
   } catch {
     return parsedFallback;
   }
@@ -105,8 +105,10 @@ const buildLikeConditionSql = (columnSql, keywords, negate = false) => {
 
   const operator = negate ? 'NOT LIKE' : 'LIKE';
   const joiner = negate ? ' AND ' : ' OR ';
+  // Escape LIKE wildcards so keywords containing % or _ match literally.
+  const escapeLike = (keyword) => keyword.replace(/[\\%_]/g, (char) => `\\${char}`);
   return normalized
-    .map((keyword) => `${columnSql} ${operator} ${sqlValue(`%${keyword}%`)}`)
+    .map((keyword) => `${columnSql} ${operator} ${sqlValue(`%${escapeLike(keyword)}%`)} ESCAPE '\\'`)
     .join(joiner);
 };
 
@@ -223,9 +225,7 @@ const getAnalyticsSqlFragments = async (db) => {
 };
 
 const serializeStringListSetting = (values, fallbackValues = []) => {
-  const normalized = normalizeStringList(values);
-  const fallback = normalizeStringList(fallbackValues);
-  const finalValues = normalized.length > 0 ? normalized : fallback;
+  const finalValues = Array.isArray(values) ? normalizeStringList(values) : normalizeStringList(fallbackValues);
   return JSON.stringify(finalValues);
 };
 
@@ -258,6 +258,8 @@ const serializeRulePayload = (actionType, actionPayload) => {
   return String(actionPayload);
 };
 
+// Returns null when the rule's split lines don't add up to this row's amount,
+// so a fixed-amount split rule simply doesn't apply to that row.
 const parseSplitDefinitions = (actionPayload, parentAmount) => {
   let parsedPayload = actionPayload;
   if (typeof parsedPayload === 'string') {
@@ -294,7 +296,7 @@ const parseSplitDefinitions = (actionPayload, parentAmount) => {
 
     const splitTotal = round2(normalizedSplits.reduce((sum, l) => sum + l.amount, 0));
     if (Math.abs(splitTotal - totalAmount) > 0.01) {
-      throw new Error(`Split amounts must sum to ${totalAmount.toFixed(2)}. Received ${splitTotal.toFixed(2)}.`);
+      return null;
     }
 
     return normalizedSplits;
@@ -341,8 +343,16 @@ const parseSplitDefinitions = (actionPayload, parentAmount) => {
     return { category, description, amount, _type: type };
   });
 
-  // Assign the remainder amount.
+  // Assign the remainder amount. Without a remainder line the lines must cover the
+  // whole row, and a remainder must keep the row's sign; otherwise the children would
+  // not add back up to the hidden parent, so the rule doesn't apply to this row.
   const remainderAmount = round2(totalAmount - allocated);
+  if (remainderLines.length === 0) {
+    if (Math.abs(allocated - totalAmount) > 0.01) return null;
+  } else if (Math.abs(remainderAmount) < 0.005 || Math.sign(remainderAmount) !== Math.sign(totalAmount)) {
+    return null;
+  }
+
   return normalizedSplits.map(({ _type, ...rest }) => {
     if (_type === 'remainder') {
       return { ...rest, amount: remainderAmount };
@@ -456,6 +466,7 @@ const applyRulesToImportedTransaction = (transaction, rules = []) => {
 
     if (actionType === 'split') {
       const splits = parseSplitDefinitions(rule.action_payload, current.amount);
+      if (!splits) continue;
       const dedupeGroupKey = current.dedupe_group_key || randomKey('split');
       const dedupeSourceAmount = current.dedupe_source_amount ?? current.amount;
       const dedupeSourceDate = current.dedupe_source_date || current.date;
@@ -552,6 +563,15 @@ const toTransaction = (row) => {
   };
 };
 
+export async function ensureDedupeIndex(db) {
+  await db.exec(`
+    DROP INDEX IF EXISTS ux_transactions_date_desc_amount;
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_dedupe
+    ON transactions (date, description, amount)
+    WHERE split_parent_id IS NULL;
+  `);
+}
+
 export async function bootstrapSchema(db) {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS transactions (
@@ -615,19 +635,19 @@ export async function bootstrapSchema(db) {
 
   // Clean up historical duplicate rows before enforcing the unique index.
   // Keep the oldest row (smallest id) for each (date, description, amount) tuple.
+  // Split children are excluded: two halves of one split can legitimately match.
   await db.exec(`
     DELETE FROM transactions
-    WHERE id NOT IN (
-      SELECT MIN(id)
-      FROM transactions
-      GROUP BY date, description, amount
-    );
+    WHERE split_parent_id IS NULL
+      AND id NOT IN (
+        SELECT MIN(id)
+        FROM transactions
+        WHERE split_parent_id IS NULL
+        GROUP BY date, description, amount
+      );
   `);
 
-  await db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_date_desc_amount
-    ON transactions (date, description, amount);
-  `);
+  await ensureDedupeIndex(db);
 
   await ensureRulesTableSchema(db);
 
@@ -785,7 +805,21 @@ export async function createTransaction(db, tx) {
   return { status: 'success', id };
 }
 
+// Split halves must stay in step with their hidden original; undo the split to change them.
+const assertNotSplitChild = async (db, transactionId) => {
+  const parentId = await scalar(
+    db,
+    `SELECT split_parent_id FROM transactions WHERE id = ${sqlValue(transactionId)};`,
+    null,
+  );
+  if (parentId !== null) {
+    throw new Error('This transaction is part of a split. Undo the split before editing or deleting it.');
+  }
+};
+
 export async function updateTransaction(db, transactionId, tx) {
+  await assertNotSplitChild(db, transactionId);
+
   await db.exec(`
     UPDATE transactions
     SET
@@ -804,6 +838,8 @@ export async function updateTransaction(db, transactionId, tx) {
 }
 
 export async function deleteTransaction(db, transactionId) {
+  await assertNotSplitChild(db, transactionId);
+
   await db.exec(`DELETE FROM transactions WHERE id = ${sqlValue(transactionId)};`);
   const affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
 
@@ -1060,7 +1096,9 @@ export async function executeRuleOnDatabase(db, rule) {
       affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
     } else if (actionType === 'split') {
       for (const parentRow of matchedRows) {
+        if (parentRow.split_parent_id !== null && parentRow.split_parent_id !== undefined) continue;
         const splits = parseSplitDefinitions(normalizedRule.action_payload, parentRow.amount);
+        if (!splits) continue;
         const dedupeGroupKey = parentRow.dedupe_group_key || randomKey('split');
         const dedupeSourceAmount = parentRow.dedupe_source_amount ?? parentRow.amount;
         const dedupeSourceDate = parentRow.dedupe_source_date || parentRow.date;

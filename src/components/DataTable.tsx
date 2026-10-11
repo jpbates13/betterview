@@ -201,8 +201,10 @@ export default function DataTable({ data, isLoading, onToggleOverride, onEdit, o
       : <ChevronDown className="h-3 w-3 text-primary-500 ml-1" />;
   };
 
-  const HeaderCell = ({ field, label, align = 'left', className = '' }: { field: SortField, label: string, align?: 'left' | 'right', className?: string }) => (
+  // A render helper rather than a nested component, so React doesn't remount the header cells on every render.
+  const renderHeaderCell = ({ field, label, align = 'left', className = '' }: { field: SortField, label: string, align?: 'left' | 'right', className?: string }) => (
     <th
+      key={field}
       scope="col"
       onClick={() => handleSort(field)}
       className={`px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer group hover:bg-gray-100/50 transition-colors ${align === 'right' ? 'text-right' : 'text-left'} ${className}`}
@@ -375,12 +377,12 @@ export default function DataTable({ data, isLoading, onToggleOverride, onEdit, o
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50/80">
               <tr>
-                <HeaderCell field="date" label="Date" className="w-[100px]" />
-                <HeaderCell field="description" label="Description" className="w-full min-w-[150px]" />
-                <HeaderCell field="category" label="Category" className="min-w-[100px]" />
-                <HeaderCell field="status" label="Spending Status" className="min-w-[160px]" />
-                <HeaderCell field="account" label="Account" className="min-w-[120px]" />
-                <HeaderCell field="amount" label="Amount" align="right" className="min-w-[100px]" />
+                {renderHeaderCell({ field: "date", label: "Date", className: "w-[100px]" })}
+                {renderHeaderCell({ field: "description", label: "Description", className: "w-full min-w-[150px]" })}
+                {renderHeaderCell({ field: "category", label: "Category", className: "min-w-[100px]" })}
+                {renderHeaderCell({ field: "status", label: "Spending Status", className: "min-w-[160px]" })}
+                {renderHeaderCell({ field: "account", label: "Account", className: "min-w-[120px]" })}
+                {renderHeaderCell({ field: "amount", label: "Amount", align: "right", className: "min-w-[100px]" })}
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-100">
@@ -438,7 +440,7 @@ export default function DataTable({ data, isLoading, onToggleOverride, onEdit, o
 
                     {!isLoading && (
                       <div className="flex flex-wrap items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {onEdit && (
+                        {onEdit && !tx.is_split && (
                           <button
                             onClick={() => onEdit(tx)}
                             className="text-gray-400 hover:text-indigo-600 bg-white hover:bg-indigo-50 border border-gray-200 hover:border-indigo-200 rounded p-1 transition-colors"
@@ -448,7 +450,7 @@ export default function DataTable({ data, isLoading, onToggleOverride, onEdit, o
                           </button>
                         )}
 
-                        {onDelete && (
+                        {onDelete && !tx.is_split && (
                           <button
                             onClick={() => onDelete(tx)}
                             className="text-gray-400 hover:text-red-600 bg-white hover:bg-red-50 border border-gray-200 hover:border-red-200 rounded p-1 transition-colors"

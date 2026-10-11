@@ -1,7 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { uploadDbToDrive } from './DriveSyncEngine.js';
 
 const DEBOUNCE_MS = 5000;
+const PENDING_SYNC_STORAGE_KEY = 'betterview_sync_pending';
+
+// Survives reloads and logouts so unsynced local edits are never mistaken for a clean copy.
+export const hasPendingSync = () => {
+  try {
+    return localStorage.getItem(PENDING_SYNC_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+
+const setPendingSyncFlag = (isPending) => {
+  try {
+    if (isPending) {
+      localStorage.setItem(PENDING_SYNC_STORAGE_KEY, '1');
+    } else {
+      localStorage.removeItem(PENDING_SYNC_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore localStorage write failures.
+  }
+};
+
+export const clearPendingSync = () => setPendingSyncFlag(false);
+
+export const AutoSyncContext = createContext({
+  syncStatus: 'idle',
+  flushSync: async () => {},
+  logout: () => {},
+});
+
+export const useAutoSyncStatus = () => useContext(AutoSyncContext);
 
 export function useAutoSync(lastMutationTime, accessToken, db) {
   const [syncStatus, setSyncStatus] = useState('idle');
@@ -25,6 +57,7 @@ export function useAutoSync(lastMutationTime, accessToken, db) {
       const dbBytes = await db.export();
       await uploadDbToDrive(accessToken, dbBytes);
       pendingSyncRef.current = false;
+      setPendingSyncFlag(false);
       setSyncStatus('synced');
     } catch (error) {
       console.error('Auto-sync failed:', error);
@@ -32,12 +65,18 @@ export function useAutoSync(lastMutationTime, accessToken, db) {
     }
   }, [accessToken, db]);
 
+  const flushSync = useCallback(async () => {
+    clearPendingTimer();
+    await runSyncNow();
+  }, [clearPendingTimer, runSyncNow]);
+
   useEffect(() => {
     if (!lastMutationTime || !accessToken || !db) {
       return undefined;
     }
 
     pendingSyncRef.current = true;
+    setPendingSyncFlag(true);
     setSyncStatus('pending');
     clearPendingTimer();
 
@@ -69,7 +108,7 @@ export function useAutoSync(lastMutationTime, accessToken, db) {
     clearPendingTimer();
   }, [clearPendingTimer]);
 
-  return { syncStatus };
+  return { syncStatus, flushSync };
 }
 
 export default useAutoSync;
