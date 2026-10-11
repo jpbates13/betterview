@@ -3,6 +3,8 @@ import { AlertCircle, CheckCircle2, Pencil, Play, Plus, Sparkles, Trash2, X } fr
 import { bootstrapSchema } from '../dbQueries.js';
 import { useDatabase } from '../DatabaseContext.jsx';
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
 const MATCH_COLUMNS = [
   { label: 'Description', value: 'description' },
   { label: 'Category', value: 'category' },
@@ -15,6 +17,8 @@ const MATCH_OPERATORS = [
   { label: 'Contains', value: 'contains' },
   { label: 'Equals', value: 'equals' },
   { label: 'Starts With', value: 'starts with' },
+  { label: 'Greater Than', value: 'greater_than' },
+  { label: 'Less Than', value: 'less_than' },
 ];
 
 const ACTION_TYPES = [
@@ -22,33 +26,83 @@ const ACTION_TYPES = [
   { label: 'Split', value: 'split' },
 ];
 
+const SPLIT_TYPES = [
+  { label: 'Fixed ($)', value: 'fixed' },
+  { label: 'Percentage (%)', value: 'percentage' },
+  { label: 'Remainder', value: 'remainder' },
+];
+
+// ── Factory helpers ──────────────────────────────────────────────────────────
+
+const createCondition = () => ({
+  column: 'description',
+  operator: 'contains',
+  value: '',
+});
+
 const createSplitLine = () => ({
   category: '',
-  amount: 0,
+  description: '',
+  type: 'fixed',
+  value: 0,
 });
 
 const createEmptyRule = () => ({
   id: null,
   name: '',
   priority: 0,
-  match_column: 'description',
-  match_operator: 'contains',
-  match_value: '',
   action_type: 'categorize',
   action_payload: '',
   is_active: true,
 });
 
+// ── Utilities ────────────────────────────────────────────────────────────────
+
 const round2 = (value) => Math.round(Number(value || 0) * 100) / 100;
 
-const parseCsvInput = (value) => {
-  return String(value || '')
+const parseCsvInput = (value) =>
+  String(value || '')
     .split(',')
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
     .filter((item, index, arr) => arr.indexOf(item) === index);
+
+/** Parse a V2.5 match_payload string into { matchType, conditions }. */
+const safeParseConditions = (matchPayload) => {
+  if (!matchPayload) return { matchType: 'all', conditions: [createCondition()] };
+  try {
+    const parsed = typeof matchPayload === 'string' ? JSON.parse(matchPayload) : matchPayload;
+
+    // V2.5 envelope: { match_type, conditions }
+    if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.conditions) && parsed.conditions.length > 0) {
+      return {
+        matchType: parsed.match_type === 'any' ? 'any' : 'all',
+        conditions: parsed.conditions.map((c) => ({
+          column: String(c?.column || 'description'),
+          operator: String(c?.operator || 'contains'),
+          value: String(c?.value || ''),
+        })),
+      };
+    }
+
+    // V2 bare array — treat as 'all'
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return {
+        matchType: 'all',
+        conditions: parsed.map((c) => ({
+          column: String(c?.column || 'description'),
+          operator: String(c?.operator || 'contains'),
+          value: String(c?.value || ''),
+        })),
+      };
+    }
+  } catch {
+    // fall through
+  }
+  return { matchType: 'all', conditions: [createCondition()] };
 };
 
+/** Parse a V2 action_payload JSON string into split lines. */
 const safeParseSplitPayload = (actionPayload) => {
   try {
     const parsed = typeof actionPayload === 'string' ? JSON.parse(actionPayload) : actionPayload;
@@ -60,26 +114,38 @@ const safeParseSplitPayload = (actionPayload) => {
 
     return splits.map((line) => ({
       category: String(line?.category || ''),
-      amount: Number(line?.amount || 0),
+      description: String(line?.description || ''),
+      // Support both V1 (amount field) and V2 (type + value fields)
+      type: String(line?.type || 'fixed'),
+      value: Number(line?.value ?? line?.amount ?? 0),
     }));
   } catch {
     return [createSplitLine(), createSplitLine()];
   }
 };
 
+const formatConditionSummary = (matchPayload) => {
+  const { matchType, conditions } = safeParseConditions(matchPayload);
+  const separator = matchType === 'any' ? ' OR ' : ' AND ';
+  const label = matchType === 'any' ? 'Matches ANY of' : 'Matches ALL of';
+  const parts = conditions.map((c) => `${c.column} ${c.operator} "${c.value}"`);
+  return `${label}: ${parts.join(separator)}`;
+};
+
 const formatSplitSummary = (actionPayload) => {
   const splits = safeParseSplitPayload(actionPayload);
-  const total = round2(splits.reduce((sum, line) => sum + (Number.isFinite(line.amount) ? line.amount : 0), 0));
   const labels = splits
-    .map((line) => `${line.category || 'Unspecified'}: ${round2(line.amount).toFixed(2)}`)
+    .map((line) => {
+      if (line.type === 'remainder') return `${line.category || 'Unspecified'}: (remainder)`;
+      if (line.type === 'percentage') return `${line.category || 'Unspecified'}: ${line.value}%`;
+      return `${line.category || 'Unspecified'}: ${round2(line.value).toFixed(2)}`;
+    })
     .join(' | ');
 
-  return {
-    count: splits.length,
-    total,
-    labels,
-  };
+  return { count: splits.length, labels };
 };
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 export default function RulesDashboard() {
   const {
@@ -101,8 +167,13 @@ export default function RulesDashboard() {
   const [isLoading, setIsLoading] = useState(true);
   const [alert, setAlert] = useState(null);
   const [editingRuleId, setEditingRuleId] = useState(null);
+
+  // Form state
   const [form, setForm] = useState(createEmptyRule());
+  const [matchType, setMatchType] = useState('all'); // 'all' (AND) | 'any' (OR)
+  const [conditions, setConditions] = useState([createCondition()]);
   const [splitLines, setSplitLines] = useState([createSplitLine(), createSplitLine()]);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runningRuleId, setRunningRuleId] = useState(null);
   const [settingsForm, setSettingsForm] = useState({
@@ -112,22 +183,30 @@ export default function RulesDashboard() {
   });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
-  const splitTotal = useMemo(
-    () => round2(splitLines.reduce((sum, line) => sum + (Number.isFinite(line.amount) ? line.amount : 0), 0)),
+  // ── Split validation metrics ───────────────────────────────────────────────
+
+  const remainderCount = useMemo(
+    () => splitLines.filter((l) => l.type === 'remainder').length,
     [splitLines],
   );
 
-  const loadRules = async () => {
-    if (!db) {
-      setRules([]);
-      setIsLoading(false);
-      return;
-    }
+  const totalPercentage = useMemo(
+    () => round2(splitLines.filter((l) => l.type === 'percentage').reduce((sum, l) => sum + Number(l.value || 0), 0)),
+    [splitLines],
+  );
 
+  const fixedTotal = useMemo(
+    () => round2(splitLines.filter((l) => l.type === 'fixed').reduce((sum, l) => sum + Number(l.value || 0), 0)),
+    [splitLines],
+  );
+
+  // ── Data loaders ──────────────────────────────────────────────────────────
+
+  const loadRules = async () => {
+    if (!db) { setRules([]); setIsLoading(false); return; }
     try {
       setIsLoading(true);
-      const rows = await getRules({});
-      setRules(rows);
+      setRules(await getRules({}));
     } catch (error) {
       console.error(error);
       setAlert({ type: 'error', message: 'Failed to load rules from the database.' });
@@ -138,11 +217,9 @@ export default function RulesDashboard() {
 
   const loadAnalyticsSettings = async () => {
     if (!db) return;
-
     try {
       const config = await getAnalyticsSettingsConfig();
       if (!config) return;
-
       setSettingsForm({
         excludedCategoryKeywords: (config.excluded_category_keywords || []).join(', '),
         excludedDescriptionKeywords: (config.excluded_description_keywords || []).join(', '),
@@ -156,7 +233,6 @@ export default function RulesDashboard() {
 
   useEffect(() => {
     if (!isReady || !db) return;
-
     const initialize = async () => {
       try {
         await bootstrapSchema(db);
@@ -168,31 +244,26 @@ export default function RulesDashboard() {
         setIsLoading(false);
       }
     };
-
     initialize();
   }, [db, isReady, dbName]);
 
+  // ── Settings handlers ─────────────────────────────────────────────────────
+
   const handleSettingsInputChange = (event) => {
     const { name, value } = event.target;
-    setSettingsForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setSettingsForm((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSaveAnalyticsSettings = async (event) => {
     event.preventDefault();
-
     try {
       setIsSavingSettings(true);
       setAlert(null);
-
       await updateAnalyticsSettingsConfig({
         excluded_category_keywords: parseCsvInput(settingsForm.excludedCategoryKeywords),
         excluded_description_keywords: parseCsvInput(settingsForm.excludedDescriptionKeywords),
         reimbursement_excluded_categories: parseCsvInput(settingsForm.reimbursementExcludedCategories),
       });
-
       await loadAnalyticsSettings();
       setAlert({ type: 'success', message: 'Analytics defaults updated successfully.' });
     } catch (error) {
@@ -203,9 +274,13 @@ export default function RulesDashboard() {
     }
   };
 
+  // ── Rule form helpers ─────────────────────────────────────────────────────
+
   const resetForm = () => {
     setEditingRuleId(null);
     setForm(createEmptyRule());
+    setMatchType('all');
+    setConditions([createCondition()]);
     setSplitLines([createSplitLine(), createSplitLine()]);
   };
 
@@ -215,13 +290,23 @@ export default function RulesDashboard() {
       id: rule.id,
       name: rule.name || '',
       priority: Number(rule.priority || 0),
-      match_column: rule.match_column || 'description',
-      match_operator: rule.match_operator || 'contains',
-      match_value: rule.match_value || '',
       action_type: rule.action_type || 'categorize',
       action_payload: rule.action_type === 'categorize' ? String(rule.action_payload || '') : '',
       is_active: Boolean(rule.is_active),
     });
+    // Populate conditions + match_type from match_payload (V2.5/V2) or legacy V1 fields
+    if (rule.match_payload) {
+      const { matchType: mt, conditions: conds } = safeParseConditions(rule.match_payload);
+      setMatchType(mt);
+      setConditions(conds);
+    } else {
+      setMatchType('all');
+      setConditions([{
+        column: rule.match_column || 'description',
+        operator: rule.match_operator || 'contains',
+        value: rule.match_value || '',
+      }]);
+    }
     setSplitLines(safeParseSplitPayload(rule.action_payload));
   };
 
@@ -229,12 +314,7 @@ export default function RulesDashboard() {
     const { name, value, type, checked } = event.target;
 
     if (name === 'action_type') {
-      setForm((prev) => ({
-        ...prev,
-        action_type: value,
-        action_payload: value === 'categorize' ? prev.action_payload : prev.action_payload,
-      }));
-
+      setForm((prev) => ({ ...prev, action_type: value }));
       if (value === 'split' && splitLines.length < 2) {
         setSplitLines([createSplitLine(), createSplitLine()]);
       }
@@ -247,26 +327,45 @@ export default function RulesDashboard() {
     }));
   };
 
+  // ── Condition list handlers ────────────────────────────────────────────────
+
+  const handleConditionChange = (index, field, value) => {
+    setConditions((prev) => prev.map((c, i) => i !== index ? c : { ...c, [field]: value }));
+  };
+
+  const addCondition = () => setConditions((prev) => [...prev, createCondition()]);
+
+  const removeCondition = (index) => {
+    setConditions((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((_, i) => i !== index);
+    });
+  };
+
+  // ── Split line handlers ───────────────────────────────────────────────────
+
   const handleSplitLineChange = (index, field, value) => {
-    setSplitLines((prev) => prev.map((line, currentIndex) => {
-      if (currentIndex !== index) return line;
+    setSplitLines((prev) => prev.map((line, i) => {
+      if (i !== index) return line;
       return {
         ...line,
-        [field]: field === 'amount' ? Number(value || 0) : value,
+        [field]: field === 'value' ? Number(value || 0) : value,
+        // When switching to Remainder, clear value
+        ...(field === 'type' && value === 'remainder' ? { value: 0 } : {}),
       };
     }));
   };
 
-  const addSplitLine = () => {
-    setSplitLines((prev) => [...prev, createSplitLine()]);
-  };
+  const addSplitLine = () => setSplitLines((prev) => [...prev, createSplitLine()]);
 
   const removeSplitLine = (index) => {
     setSplitLines((prev) => {
       if (prev.length <= 2) return prev;
-      return prev.filter((_, currentIndex) => currentIndex !== index);
+      return prev.filter((_, i) => i !== index);
     });
   };
+
+  // ── Submit ────────────────────────────────────────────────────────────────
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -276,32 +375,67 @@ export default function RulesDashboard() {
       return;
     }
 
-    if (!form.match_value.trim()) {
-      setAlert({ type: 'error', message: 'Please provide a match value.' });
+    // Validate conditions
+    if (conditions.some((c) => !String(c.value || '').trim())) {
+      setAlert({ type: 'error', message: 'Every condition must have a value.' });
       return;
     }
 
+    // Build match_payload with V2.5 envelope
+    const matchPayload = JSON.stringify({
+      match_type: matchType,
+      conditions: conditions.map((c) => ({
+        column: c.column,
+        operator: c.operator,
+        value: String(c.value).trim(),
+      })),
+    });
+
+    // Build action_payload
     let actionPayload = form.action_payload.trim();
+
     if (form.action_type === 'categorize') {
       if (!actionPayload) {
         setAlert({ type: 'error', message: 'Categorize rules require a target category.' });
         return;
       }
     } else {
-      const normalizedSplits = splitLines.map((line) => ({
-        category: String(line.category || '').trim(),
-        amount: Number(line.amount || 0),
-      }));
-
-      if (normalizedSplits.length < 2) {
+      // Split validation
+      if (splitLines.length < 2) {
         setAlert({ type: 'error', message: 'Split rules need at least two lines.' });
         return;
       }
 
-      if (normalizedSplits.some((line) => !line.category || !Number.isFinite(line.amount) || Math.abs(line.amount) < 0.005)) {
-        setAlert({ type: 'error', message: 'Each split line needs a category and a non-zero amount.' });
+      if (splitLines.some((l) => !l.category.trim())) {
+        setAlert({ type: 'error', message: 'Each split line needs a category.' });
         return;
       }
+
+      if (remainderCount > 1) {
+        setAlert({ type: 'error', message: 'A split rule may only have one Remainder line.' });
+        return;
+      }
+
+      if (totalPercentage > 100) {
+        setAlert({ type: 'error', message: `Percentages must not exceed 100%. Current total: ${totalPercentage}%.` });
+        return;
+      }
+
+      const hasNonZeroFixed = splitLines
+        .filter((l) => l.type === 'fixed')
+        .every((l) => Math.abs(Number(l.value || 0)) >= 0.005);
+
+      if (!hasNonZeroFixed) {
+        setAlert({ type: 'error', message: 'Fixed split amounts must be non-zero.' });
+        return;
+      }
+
+      const normalizedSplits = splitLines.map((line) => ({
+        category: String(line.category || '').trim(),
+        description: String(line.description || '').trim(),
+        type: line.type,
+        value: Number(line.value || 0),
+      }));
 
       actionPayload = JSON.stringify({ splits: normalizedSplits });
     }
@@ -309,7 +443,12 @@ export default function RulesDashboard() {
     const payload = {
       ...form,
       name: form.name.trim(),
-      match_value: form.match_value.trim(),
+      // Persist V2 compound conditions
+      match_payload: matchPayload,
+      // Also keep V1 legacy fields from the first condition for backward compat
+      match_column: conditions[0]?.column || 'description',
+      match_operator: conditions[0]?.operator || 'contains',
+      match_value: String(conditions[0]?.value || '').trim(),
       action_payload: actionPayload,
       priority: Number(form.priority || 0),
       is_active: Boolean(form.is_active),
@@ -337,19 +476,17 @@ export default function RulesDashboard() {
     }
   };
 
+  // ── Rule management handlers ──────────────────────────────────────────────
+
   const handleDelete = async (rule) => {
     if (!db) return;
-
     const confirmed = window.confirm(`Delete rule "${rule.name}"? This cannot be undone.`);
     if (!confirmed) return;
-
     try {
       await deleteRule(rule.id);
       await loadRules();
       setAlert({ type: 'success', message: 'Rule deleted successfully.' });
-      if (editingRuleId === rule.id) {
-        resetForm();
-      }
+      if (editingRuleId === rule.id) resetForm();
     } catch (error) {
       console.error(error);
       setAlert({ type: 'error', message: error?.message || 'Failed to delete rule.' });
@@ -358,7 +495,6 @@ export default function RulesDashboard() {
 
   const handleRunRule = async (rule) => {
     if (!db) return;
-
     try {
       setRunningRuleId(rule.id);
       setAlert(null);
@@ -379,17 +515,25 @@ export default function RulesDashboard() {
     }
   };
 
-  const renderRuleSummary = (rule) => {
-    if (rule.action_type === 'split') {
-      const { count, total, labels } = formatSplitSummary(rule.action_payload);
-      return `${count} splits totaling ${total.toFixed(2)} | ${labels}`;
-    }
+  // ── Summary renderer ──────────────────────────────────────────────────────
 
-    return `Set category to ${String(rule.action_payload || '').trim() || 'Uncategorized'}`;
+  const renderRuleSummary = (rule) => {
+    const matchSummary = rule.match_payload
+      ? formatConditionSummary(rule.match_payload)
+      : `Matches ALL of: ${rule.match_column} ${rule.match_operator} "${rule.match_value}"`;
+
+    const actionSummary = rule.action_type === 'split'
+      ? (() => { const { count, labels } = formatSplitSummary(rule.action_payload); return `${count} splits | ${labels}`; })()
+      : `Set category to ${String(rule.action_payload || '').trim() || 'Uncategorized'}`;
+
+    return { matchSummary, actionSummary };
   };
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Rules Engine</h1>
@@ -404,26 +548,25 @@ export default function RulesDashboard() {
         </div>
       </div>
 
+      {/* Alert */}
       {alert && (
         <div className={`p-4 rounded-xl flex items-start shadow-sm animate-in fade-in slide-in-from-top-2 ${alert.type === 'success'
           ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
           : 'bg-red-50 text-red-800 border border-red-200'
           }`}>
-          {alert.type === 'success' ? (
-            <CheckCircle2 className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-emerald-600" />
-          ) : (
-            <AlertCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-red-600" />
-          )}
+          {alert.type === 'success'
+            ? <CheckCircle2 className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-emerald-600" />
+            : <AlertCircle className="h-5 w-5 mr-3 mt-0.5 flex-shrink-0 text-red-600" />}
           <span className="font-medium text-sm sm:text-base leading-snug">{alert.message}</span>
         </div>
       )}
 
+      {/* Analytics Settings */}
       <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60">
           <h2 className="text-lg font-semibold text-gray-900">Analytics defaults</h2>
           <p className="text-sm text-gray-500 mt-1">Comma-separated keywords and categories used for exclusion and reimbursement math.</p>
         </div>
-
         <form onSubmit={handleSaveAnalyticsSettings} className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-4 items-end">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Excluded category keywords</label>
@@ -436,7 +579,6 @@ export default function RulesDashboard() {
               placeholder="transfer, saving"
             />
           </div>
-
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Excluded description keywords</label>
             <input
@@ -448,7 +590,6 @@ export default function RulesDashboard() {
               placeholder="bill payment, payment thank you"
             />
           </div>
-
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Reimbursement-excluded categories</label>
             <input
@@ -460,7 +601,6 @@ export default function RulesDashboard() {
               placeholder="income, transfers, credit card payment"
             />
           </div>
-
           <div className="lg:col-span-3 flex justify-end">
             <button
               type="submit"
@@ -474,6 +614,7 @@ export default function RulesDashboard() {
       </section>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] gap-8 items-start">
+        {/* ── Create / Edit Rule Form ────────────────────────────────────────── */}
         <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between">
             <div>
@@ -493,6 +634,7 @@ export default function RulesDashboard() {
           </div>
 
           <form onSubmit={handleSubmit} className="p-6 space-y-5">
+            {/* Name + Priority */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
@@ -506,7 +648,6 @@ export default function RulesDashboard() {
                   required
                 />
               </div>
-
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
                 <input
@@ -519,53 +660,109 @@ export default function RulesDashboard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Match Column</label>
-                <select
-                  name="match_column"
-                  value={form.match_column}
-                  onChange={handleFieldChange}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
+            {/* ── Compound Conditions ─────────────────────────────────────── */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">Match conditions</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">Define when this rule should trigger.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={addCondition}
+                  className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
                 >
-                  {MATCH_COLUMNS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
+                  <Plus className="h-4 w-4" />
+                  Add Condition
+                </button>
+              </div>
+
+              {/* Match Requirement toggle */}
+              <div className="flex items-center gap-3 p-3 rounded-xl border border-indigo-100 bg-indigo-50/40">
+                <label className="text-xs font-semibold text-indigo-700 whitespace-nowrap">Match Requirement</label>
+                <select
+                  value={matchType}
+                  onChange={(e) => setMatchType(e.target.value)}
+                  className="flex-1 px-3 py-1.5 border border-indigo-200 rounded-lg text-sm text-indigo-900 bg-white focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 outline-none transition-all"
+                >
+                  <option value="all">Match ALL of the following conditions (AND)</option>
+                  <option value="any">Match ANY of the following conditions (OR)</option>
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Operator</label>
-                <select
-                  name="match_operator"
-                  value={form.match_operator}
-                  onChange={handleFieldChange}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
-                >
-                  {MATCH_OPERATORS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+              <div className="space-y-2">
+                {conditions.map((condition, index) => (
+                  <div key={index}>
+                    {index > 0 && (
+                      <div className="flex items-center gap-2 my-1">
+                        <div className="flex-1 h-px bg-gray-200" />
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                          matchType === 'any'
+                            ? 'text-amber-700 bg-amber-50 border-amber-200'
+                            : 'text-indigo-600 bg-indigo-50 border-indigo-200'
+                        }`}>
+                          {matchType === 'any' ? 'OR' : 'AND'}
+                        </span>
+                        <div className="flex-1 h-px bg-gray-200" />
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end p-3 border border-gray-200 rounded-xl bg-gray-50/40">
+                      {/* Column */}
+                      <div className="md:col-span-4">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Column</label>
+                        <select
+                          value={condition.column}
+                          onChange={(e) => handleConditionChange(index, 'column', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
+                        >
+                          {MATCH_COLUMNS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {/* Operator */}
+                      <div className="md:col-span-3">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Operator</label>
+                        <select
+                          value={condition.operator}
+                          onChange={(e) => handleConditionChange(index, 'operator', e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
+                        >
+                          {MATCH_OPERATORS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {/* Value */}
+                      <div className="md:col-span-4">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Value</label>
+                        <input
+                          type="text"
+                          value={condition.value}
+                          onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
+                          placeholder="Amazon"
+                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+                        />
+                      </div>
+                      {/* Remove */}
+                      <div className="md:col-span-1 flex md:justify-end">
+                        <button
+                          type="button"
+                          onClick={() => removeCondition(index)}
+                          disabled={conditions.length <= 1}
+                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:opacity-40"
+                          title="Remove condition"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Match Value</label>
-              <input
-                type="text"
-                name="match_value"
-                value={form.match_value}
-                onChange={handleFieldChange}
-                placeholder="Amazon"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
-                required
-              />
-            </div>
-
+            {/* Action Type */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Action Type</label>
               <select
@@ -574,17 +771,16 @@ export default function RulesDashboard() {
                 onChange={handleFieldChange}
                 className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
               >
-                {ACTION_TYPES.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
+                {ACTION_TYPES.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
               </select>
             </div>
 
+            {/* Action Payload */}
             {form.action_type === 'categorize' ? (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Action Payload</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Target Category</label>
                 <input
                   type="text"
                   name="action_payload"
@@ -594,14 +790,15 @@ export default function RulesDashboard() {
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
                   required
                 />
-                <p className="text-xs text-gray-500 mt-1">This is the category that will be written to matching transactions.</p>
+                <p className="text-xs text-gray-500 mt-1">This category will be written to matching transactions.</p>
               </div>
             ) : (
+              /* ── Dynamic Split Payload ───────────────────────────────── */
               <div className="space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h3 className="text-sm font-semibold text-gray-900">Split payload</h3>
-                    <p className="text-xs text-gray-500 mt-1">Define the categories and amounts for the split rows.</p>
+                    <p className="text-xs text-gray-500 mt-1">Define splits using fixed amounts, percentages, or a remainder.</p>
                   </div>
                   <button
                     type="button"
@@ -614,54 +811,90 @@ export default function RulesDashboard() {
                 </div>
 
                 <div className="space-y-3">
-                  {splitLines.map((line, index) => (
-                    <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end p-3 border border-gray-200 rounded-xl bg-gray-50/40">
-                      <div className="md:col-span-7">
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
-                        <input
-                          type="text"
-                          value={line.category}
-                          onChange={(event) => handleSplitLineChange(index, 'category', event.target.value)}
-                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
-                          placeholder="Groceries"
-                        />
+                  {splitLines.map((line, index) => {
+                    const isRemainder = line.type === 'remainder';
+                    return (
+                      <div key={index} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end p-3 border border-gray-200 rounded-xl bg-gray-50/40">
+                        {/* Category */}
+                        <div className="md:col-span-4">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                          <input
+                            type="text"
+                            value={line.category}
+                            onChange={(e) => handleSplitLineChange(index, 'category', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+                            placeholder="Groceries"
+                          />
+                        </div>
+                        {/* Type */}
+                        <div className="md:col-span-3">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+                          <select
+                            value={line.type}
+                            onChange={(e) => handleSplitLineChange(index, 'type', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
+                          >
+                            {SPLIT_TYPES.map((opt) => (
+                              <option key={opt.value} value={opt.value}>{opt.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                        {/* Value */}
+                        <div className="md:col-span-4">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">
+                            {isRemainder ? 'Value (auto)' : line.type === 'percentage' ? 'Percentage (%)' : 'Amount ($)'}
+                          </label>
+                          <input
+                            type="number"
+                            step={line.type === 'percentage' ? '0.1' : '0.01'}
+                            value={line.value}
+                            disabled={isRemainder}
+                            onChange={(e) => handleSplitLineChange(index, 'value', e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all disabled:bg-gray-100 disabled:cursor-not-allowed disabled:text-gray-400"
+                            placeholder={isRemainder ? 'Calculated automatically' : line.type === 'percentage' ? '50' : '-24.99'}
+                          />
+                        </div>
+                        {/* Remove */}
+                        <div className="md:col-span-1 flex md:justify-end">
+                          <button
+                            type="button"
+                            onClick={() => removeSplitLine(index)}
+                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:opacity-40"
+                            disabled={splitLines.length <= 2}
+                            title="Remove split line"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
                       </div>
-                      <div className="md:col-span-4">
-                        <label className="block text-xs font-medium text-gray-600 mb-1">Amount</label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={line.amount}
-                          onChange={(event) => handleSplitLineChange(index, 'amount', event.target.value)}
-                          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
-                          placeholder="-24.99"
-                        />
-                      </div>
-                      <div className="md:col-span-1 flex md:justify-end">
-                        <button
-                          type="button"
-                          onClick={() => removeSplitLine(index)}
-                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors disabled:opacity-40"
-                          disabled={splitLines.length <= 2}
-                          title="Remove split line"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
-                <div className="p-3 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 flex items-center justify-between gap-4">
-                  <span className="font-medium">Split total</span>
-                  <span className="font-semibold text-gray-900">
-                    {splitTotal.toFixed(2)}
-                  </span>
+                {/* Validation Hints */}
+                <div className="space-y-1.5">
+                  {remainderCount > 1 && (
+                    <p className="text-xs text-red-600 font-medium">⚠ Only one Remainder line is allowed.</p>
+                  )}
+                  {totalPercentage > 100 && (
+                    <p className="text-xs text-red-600 font-medium">⚠ Percentage total ({totalPercentage}%) exceeds 100%.</p>
+                  )}
+                  {remainderCount === 0 && (
+                    <p className="text-xs text-gray-500">
+                      Fixed total: <span className="font-medium">{fixedTotal.toFixed(2)}</span> + {totalPercentage}% of transaction.
+                      The split total must match the parent transaction at rule-run time.
+                    </p>
+                  )}
+                  {remainderCount === 1 && (
+                    <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-1.5">
+                      ✓ Remainder will absorb everything not claimed by fixed + percentage lines.
+                    </p>
+                  )}
                 </div>
-                <p className="text-xs text-gray-500">The split total must match the transaction amount when the rule runs.</p>
               </div>
             )}
 
+            {/* Active toggle */}
             <label className="inline-flex items-center gap-2 text-sm text-gray-700 select-none">
               <input
                 type="checkbox"
@@ -673,6 +906,7 @@ export default function RulesDashboard() {
               Active
             </label>
 
+            {/* Submit row */}
             <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
               <button
                 type="button"
@@ -692,6 +926,7 @@ export default function RulesDashboard() {
           </form>
         </section>
 
+        {/* ── Existing Rules ─────────────────────────────────────────────────── */}
         <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-100 bg-gray-50/60 flex items-center justify-between gap-3">
             <div>
@@ -721,6 +956,7 @@ export default function RulesDashboard() {
             ) : (
               <div className="space-y-4">
                 {rules.map((rule) => {
+                  const { matchSummary, actionSummary } = renderRuleSummary(rule);
                   const isRunning = runningRuleId === rule.id;
                   return (
                     <article key={rule.id} className="p-4 rounded-2xl border border-gray-200 bg-white shadow-sm">
@@ -735,11 +971,11 @@ export default function RulesDashboard() {
                               Priority {rule.priority}
                             </span>
                           </div>
-                          <p className="text-sm text-gray-600 mt-2 break-words">
-                            {rule.match_column} {rule.match_operator} “{rule.match_value}”
-                          </p>
-                          <p className="text-sm text-gray-500 mt-2 break-words">
-                            {rule.action_type === 'split' ? 'Split' : 'Categorize'} | {renderRuleSummary(rule)}
+                          {/* Match summary */}
+                          <p className="text-sm text-gray-600 mt-2 break-words">{matchSummary}</p>
+                          {/* Action summary */}
+                          <p className="text-sm text-gray-500 mt-1 break-words">
+                            {rule.action_type === 'split' ? 'Split' : 'Categorize'} | {actionSummary}
                           </p>
                         </div>
 
@@ -750,11 +986,9 @@ export default function RulesDashboard() {
                             disabled={isRunning}
                             className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-75"
                           >
-                            {isRunning ? (
-                              <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            ) : (
-                              <Play className="h-4 w-4" />
-                            )}
+                            {isRunning
+                              ? <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                              : <Play className="h-4 w-4" />}
                             Run on Existing Data
                           </button>
                           <button

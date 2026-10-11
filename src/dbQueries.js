@@ -233,9 +233,12 @@ const toRule = (row) => ({
   id: Number(row.id),
   name: normalizeText(row.name),
   priority: Number(row.priority ?? 0),
+  // Legacy V1 fields — kept for backward compat, superseded by match_payload
   match_column: normalizeText(row.match_column),
   match_operator: normalizeText(row.match_operator),
   match_value: normalizeText(row.match_value),
+  // V2 compound-condition field
+  match_payload: row.match_payload ?? null,
   action_type: normalizeText(row.action_type),
   action_payload: row.action_payload ?? '',
   is_active: Boolean(Number(row.is_active ?? 0)),
@@ -269,58 +272,151 @@ const parseSplitDefinitions = (actionPayload, parentAmount) => {
     throw new Error('Split rules require at least two split lines.');
   }
 
+  const totalAmount = round2(toNumber(parentAmount));
+
+  // Detect whether this is the new V2 format (has `type`) or legacy V1 (has `amount`).
+  const isV2 = splits.some((line) => line?.type !== undefined);
+
+  if (!isV2) {
+    // ── Legacy V1 path: all lines have an explicit `amount` ──────────────
+    const normalizedSplits = splits.map((line) => {
+      const category = normalizeText(line?.category);
+      const description = normalizeText(line?.description);
+      const amount = round2(toNumber(line?.amount, NaN));
+
+      if (!category) throw new Error('Each split line must include a category.');
+      if (!Number.isFinite(amount) || Math.abs(amount) < 0.005) {
+        throw new Error('Split amounts must be non-zero.');
+      }
+
+      return { category, description, amount };
+    });
+
+    const splitTotal = round2(normalizedSplits.reduce((sum, l) => sum + l.amount, 0));
+    if (Math.abs(splitTotal - totalAmount) > 0.01) {
+      throw new Error(`Split amounts must sum to ${totalAmount.toFixed(2)}. Received ${splitTotal.toFixed(2)}.`);
+    }
+
+    return normalizedSplits;
+  }
+
+  // ── V2 path: fixed / percentage / remainder ───────────────────────────
+  const remainderLines = splits.filter((line) => normalizeLower(line?.type) === 'remainder');
+  if (remainderLines.length > 1) {
+    throw new Error('A split rule may only have one Remainder line.');
+  }
+
+  const totalPercentage = splits
+    .filter((line) => normalizeLower(line?.type) === 'percentage')
+    .reduce((sum, line) => sum + toNumber(line?.value, 0), 0);
+
+  if (totalPercentage > 100) {
+    throw new Error(`Percentages must not exceed 100%. Received ${totalPercentage}%.`);
+  }
+
+  // Calculate fixed amounts first.
+  let allocated = 0;
   const normalizedSplits = splits.map((line) => {
     const category = normalizeText(line?.category);
     const description = normalizeText(line?.description);
-    const amount = round2(toNumber(line?.amount, NaN));
+    const type = normalizeLower(line?.type) || 'fixed';
 
-    if (!category) {
-      throw new Error('Each split line must include a category.');
+    if (!category) throw new Error('Each split line must include a category.');
+
+    let amount;
+    if (type === 'fixed') {
+      amount = round2(toNumber(line?.value, NaN));
+      if (!Number.isFinite(amount) || Math.abs(amount) < 0.005) {
+        throw new Error('Fixed split amounts must be non-zero.');
+      }
+      allocated = round2(allocated + amount);
+    } else if (type === 'percentage') {
+      amount = round2(totalAmount * (toNumber(line?.value, 0) / 100));
+      allocated = round2(allocated + amount);
+    } else {
+      // placeholder — remainder filled after the loop
+      amount = null;
     }
 
-    if (!Number.isFinite(amount) || Math.abs(amount) < 0.005) {
-      throw new Error('Split amounts must be non-zero.');
-    }
-
-    return {
-      category,
-      description,
-      amount,
-    };
+    return { category, description, amount, _type: type };
   });
 
-  const splitTotal = round2(normalizedSplits.reduce((sum, line) => sum + line.amount, 0));
-  const parentTotal = round2(toNumber(parentAmount));
-  if (Math.abs(splitTotal - parentTotal) > 0.01) {
-    throw new Error(`Split amounts must sum to ${parentTotal.toFixed(2)}. Received ${splitTotal.toFixed(2)}.`);
+  // Assign the remainder amount.
+  const remainderAmount = round2(totalAmount - allocated);
+  return normalizedSplits.map(({ _type, ...rest }) => {
+    if (_type === 'remainder') {
+      return { ...rest, amount: remainderAmount };
+    }
+    return rest;
+  });
+};
+
+const evaluateCondition = (transaction, condition) => {
+  const column = normalizeText(condition?.column);
+  if (!column) return false;
+
+  const operator = normalizeRuleMatchOperator(condition?.operator);
+
+  // Numeric operators
+  if (operator === 'greater_than' || operator === 'less_than') {
+    const txVal = toNumber(transaction?.[column], NaN);
+    const condVal = toNumber(condition?.value, NaN);
+    if (!Number.isFinite(txVal) || !Number.isFinite(condVal)) return false;
+    return operator === 'greater_than' ? txVal > condVal : txVal < condVal;
   }
 
-  return normalizedSplits;
+  // Text operators
+  const needle = normalizeLower(condition?.value);
+  if (!needle) return false;
+  const haystack = normalizeLower(transaction?.[column]);
+
+  if (operator === 'contains') return haystack.includes(needle);
+  if (operator === 'equals') return haystack === needle;
+  if (operator === 'starts with') return haystack.startsWith(needle);
+
+  return false;
+};
+
+const parseMatchPayload = (rule) => {
+  // Prefer V2/V2.5 match_payload if present.
+  if (rule.match_payload) {
+    try {
+      const parsed = typeof rule.match_payload === 'string'
+        ? JSON.parse(rule.match_payload)
+        : rule.match_payload;
+
+      // V2.5 envelope: { match_type, conditions }
+      if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.conditions)) {
+        return {
+          matchType: normalizeLower(parsed.match_type) === 'any' ? 'any' : 'all',
+          conditions: parsed.conditions,
+        };
+      }
+
+      // V2 bare array — treat as 'all'
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return { matchType: 'all', conditions: parsed };
+      }
+    } catch {
+      // fall through to legacy
+    }
+  }
+
+  // V1 single-condition fields.
+  const col = normalizeText(rule.match_column);
+  const op = normalizeRuleMatchOperator(rule.match_operator);
+  const val = normalizeText(rule.match_value);
+  if (!col || !val) return { matchType: 'all', conditions: [] };
+  return { matchType: 'all', conditions: [{ column: col, operator: op, value: val }] };
 };
 
 const ruleMatchesTransaction = (transaction, rule) => {
-  const matchColumn = normalizeText(rule.match_column);
-  if (!matchColumn) return false;
-
-  const needle = normalizeLower(rule.match_value);
-  if (!needle) return false;
-
-  const haystack = normalizeLower(transaction?.[matchColumn]);
-  const operator = normalizeRuleMatchOperator(rule.match_operator);
-
-  if (operator === 'contains') {
-    return haystack.includes(needle);
-  }
-
-  if (operator === 'equals') {
-    return haystack === needle;
-  }
-
-  if (operator === 'starts with') {
-    return haystack.startsWith(needle);
-  }
-
-  return false;
+  const { matchType, conditions } = parseMatchPayload(rule);
+  if (conditions.length === 0) return false;
+  const test = (condition) => evaluateCondition(transaction, condition);
+  return matchType === 'any'
+    ? conditions.some(test)
+    : conditions.every(test);
 };
 
 const buildSplitChildRow = (parentRow, split, splitParentId = null) => ({
@@ -387,12 +483,28 @@ const applyRulesToImportedTransaction = (transaction, rules = []) => {
   };
 };
 
+const serializeMatchPayload = (conditions) => {
+  if (!Array.isArray(conditions) || conditions.length === 0) return null;
+  return JSON.stringify(
+    conditions.map((c) => ({
+      column: normalizeText(c.column),
+      operator: normalizeRuleMatchOperator(c.operator),
+      value: normalizeText(c.value),
+    }))
+  );
+};
+
 const buildRuleInsertValues = (rule) => ({
   name: normalizeText(rule.name),
   priority: toNumber(rule.priority, 0),
+  // V1 legacy columns — preserved for backward compat
   match_column: normalizeText(rule.match_column),
   match_operator: normalizeText(rule.match_operator),
   match_value: normalizeText(rule.match_value),
+  // V2 compound conditions
+  match_payload: rule.match_payload !== undefined
+    ? (typeof rule.match_payload === 'string' ? rule.match_payload : serializeMatchPayload(rule.match_payload))
+    : null,
   action_type: normalizeText(rule.action_type),
   action_payload: serializeRulePayload(rule.action_type, rule.action_payload),
   is_active: rule.is_active === undefined ? 1 : Number(Boolean(rule.is_active)),
@@ -404,63 +516,20 @@ const buildRuleUpdateValues = (rule) => ({
 });
 
 const ensureRulesTableSchema = async (db) => {
-  const requiredRuleColumns = [
-    'id',
-    'name',
-    'priority',
-    'match_column',
-    'match_operator',
-    'match_value',
-    'action_type',
-    'action_payload',
-    'is_active',
+  // Use safe ALTER TABLE ADD COLUMN instead of a table-rebuild so this is
+  // idempotent and can never crash with 'no such table: rules_new'.
+  const columnsToAdd = [
+    { name: 'match_payload', type: 'TEXT' },
+    // Add future V3+ columns here as needed.
   ];
 
-  const ruleTableInfo = rowify(await db.exec('PRAGMA table_info(rules);'));
-  const ruleColumns = new Set(ruleTableInfo.map((col) => String(col.name)));
-  const isSchemaComplete = requiredRuleColumns.every((columnName) => ruleColumns.has(columnName));
-
-  if (isSchemaComplete) {
-    return;
+  for (const col of columnsToAdd) {
+    try {
+      await db.exec(`ALTER TABLE rules ADD COLUMN ${col.name} ${col.type};`);
+    } catch {
+      // Column already exists — safe to ignore.
+    }
   }
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS rules_new (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT,
-      priority INTEGER DEFAULT 0,
-      match_column TEXT,
-      match_operator TEXT,
-      match_value TEXT,
-      action_type TEXT,
-      action_payload TEXT,
-      is_active INTEGER DEFAULT 1
-    );
-  `);
-
-  if (ruleColumns.size > 0) {
-    const hasColumn = (columnName) => ruleColumns.has(columnName);
-    const selectColumns = [
-      'id',
-      hasColumn('name') ? 'name' : "'Unnamed Rule ' || id AS name",
-      hasColumn('priority') ? 'priority' : '0 AS priority',
-      hasColumn('match_column') ? "COALESCE(match_column, 'description') AS match_column" : "'description' AS match_column",
-      hasColumn('match_operator') ? "COALESCE(match_operator, 'contains') AS match_operator" : "'contains' AS match_operator",
-      hasColumn('match_value') ? "COALESCE(match_value, '') AS match_value" : "'' AS match_value",
-      hasColumn('action_type') ? "COALESCE(action_type, 'categorize') AS action_type" : "'categorize' AS action_type",
-      hasColumn('action_payload') ? "COALESCE(action_payload, '') AS action_payload" : "'' AS action_payload",
-      hasColumn('is_active') ? 'COALESCE(is_active, 1) AS is_active' : '1 AS is_active',
-    ];
-
-    await db.exec(`
-      INSERT INTO rules_new (${requiredRuleColumns.join(', ')})
-      SELECT ${selectColumns.join(', ')}
-      FROM rules;
-    `);
-  }
-
-  await db.exec(`DROP TABLE IF EXISTS rules;`);
-  await db.exec(`ALTER TABLE rules_new RENAME TO rules;`);
 };
 
 const toTransaction = (row) => {
@@ -508,6 +577,7 @@ export async function bootstrapSchema(db) {
       match_column TEXT,
       match_operator TEXT,
       match_value TEXT,
+      match_payload TEXT,
       action_type TEXT,
       action_payload TEXT,
       is_active INTEGER DEFAULT 1
@@ -573,6 +643,78 @@ export async function bootstrapSchema(db) {
       action_payload = COALESCE(action_payload, ''),
       is_active = COALESCE(is_active, 1);
   `);
+
+  // ── V1 → V2 Data Migration ──────────────────────────────────────────────────
+  // For any rule with NULL match_payload, build it from the legacy V1 columns.
+  const unmigratedV1 = rowify(await db.exec(`
+    SELECT id, match_column, match_operator, match_value, action_type, action_payload
+    FROM rules
+    WHERE match_payload IS NULL;
+  `));
+
+  for (const row of unmigratedV1) {
+    // Wrap directly in the V2.5 envelope so it never needs a second migration.
+    const matchPayload = JSON.stringify({
+      match_type: 'all',
+      conditions: [{
+        column: normalizeText(row.match_column) || 'description',
+        operator: normalizeRuleMatchOperator(row.match_operator) || 'contains',
+        value: normalizeText(row.match_value),
+      }],
+    });
+
+    // Migrate split action_payload from V1 {amount} to V2 {type:'fixed', value}
+    let actionPayload = row.action_payload;
+    if (normalizeRuleActionType(row.action_type) === 'split' && actionPayload) {
+      try {
+        const parsed = typeof actionPayload === 'string' ? JSON.parse(actionPayload) : actionPayload;
+        const splits = Array.isArray(parsed) ? parsed : parsed?.splits;
+        if (Array.isArray(splits)) {
+          const v2Splits = splits.map((line) => ({
+            category: normalizeText(line?.category),
+            description: normalizeText(line?.description),
+            type: 'fixed',
+            value: toNumber(line?.amount, 0),
+          }));
+          actionPayload = JSON.stringify({ splits: v2Splits });
+        }
+      } catch {
+        // Leave action_payload as-is if parsing fails.
+      }
+    }
+
+    await db.exec(`
+      UPDATE rules
+      SET match_payload = ${sqlValue(matchPayload)},
+          action_payload = ${sqlValue(actionPayload)}
+      WHERE id = ${sqlValue(row.id)};
+    `);
+  }
+
+  // ── V2 → V2.5 Data Migration ─────────────────────────────────────────────────
+  // Wrap any bare-array match_payload into the new { match_type, conditions } envelope.
+  const unmigratedV2 = rowify(await db.exec(`
+    SELECT id, match_payload
+    FROM rules
+    WHERE match_payload IS NOT NULL;
+  `));
+
+  for (const row of unmigratedV2) {
+    try {
+      const parsed = JSON.parse(row.match_payload);
+      // Only needs migration if it's a bare array (V2), not already an object (V2.5)
+      if (Array.isArray(parsed)) {
+        const wrapped = JSON.stringify({ match_type: 'all', conditions: parsed });
+        await db.exec(`
+          UPDATE rules
+          SET match_payload = ${sqlValue(wrapped)}
+          WHERE id = ${sqlValue(row.id)};
+        `);
+      }
+    } catch {
+      // Unparseable payload — leave it alone; the engine falls back gracefully.
+    }
+  }
 }
 
 export async function getTransactions(db, { startDate, endDate, categories = [] } = {}) {
@@ -697,6 +839,7 @@ export async function getRules(db, { activeOnly = false } = {}) {
       match_column,
       match_operator,
       match_value,
+      match_payload,
       action_type,
       action_payload,
       is_active
@@ -799,6 +942,7 @@ export async function createRule(db, rule) {
       match_column,
       match_operator,
       match_value,
+      match_payload,
       action_type,
       action_payload,
       is_active
@@ -808,6 +952,7 @@ export async function createRule(db, rule) {
       ${sqlValue(values.match_column)},
       ${sqlValue(values.match_operator)},
       ${sqlValue(values.match_value)},
+      ${sqlValue(values.match_payload)},
       ${sqlValue(values.action_type)},
       ${sqlValue(values.action_payload)},
       ${sqlValue(values.is_active)}
@@ -830,6 +975,7 @@ export async function updateRule(db, ruleId, rule) {
       match_column = ${sqlValue(values.match_column)},
       match_operator = ${sqlValue(values.match_operator)},
       match_value = ${sqlValue(values.match_value)},
+      match_payload = ${sqlValue(values.match_payload)},
       action_type = ${sqlValue(values.action_type)},
       action_payload = ${sqlValue(values.action_payload)},
       is_active = ${sqlValue(values.is_active)}
