@@ -1,6 +1,6 @@
 // Budgets, tags, reimbursements, recurring charges, net worth and yearly summaries.
 import { saveDbToBrowser } from '../dbStorage.js';
-import { bootstrapSchema, getAnalyticsInclusionSql, getCategoryNetSpending } from '../dbQueries.js';
+import { bootstrapSchema, getAnalyticsInclusionSql, getAnalyticsSql, getCategoryNetSpending } from '../dbQueries.js';
 import { binds, changes, inTransaction, normalizeText, placeholders, queryRows, round2, toNumber } from './sql.js';
 
 const monthBounds = (month) => {
@@ -155,6 +155,76 @@ export async function getLinkedReimbursements(db, expenseId) {
     SELECT id, date, description, amount FROM transactions
     WHERE reimburses_id = ? AND is_hidden = 0 ORDER BY date;
   `, binds(expenseId));
+}
+
+const SPLIT_SHARES = [2, 3, 4, 5, 6];
+const SPLIT_WINDOW_DAYS = 45;
+
+/**
+ * Likely expenses for an unlinked credit: earlier expenses (up to `days` before it, or a
+ * few days after) that still have room to be paid back, ranked by how well the amount
+ * fits (the whole bill, or an even share of it for split bills), a "reimbursable" tag,
+ * the same category, and closeness in time. Each has a short reason.
+ */
+export async function suggestReimbursementLinks(db, creditId, { days = 120, limit = 5 } = {}) {
+  const [credit] = await queryRows(db, 'SELECT id, date, amount, category FROM transactions WHERE id = ?;', binds(creditId));
+  if (!credit || toNumber(credit.amount) <= 0) return [];
+  const creditAmount = toNumber(credit.amount);
+  const { includedConditionSql, reimbursementExcludedCategoriesSql } = await getAnalyticsSql(db);
+
+  const candidates = await queryRows(db, `
+    SELECT t.id, t.date, t.description, t.amount, t.category,
+           COALESCE((SELECT SUM(r.amount) FROM transactions r WHERE r.reimburses_id = t.id AND r.is_hidden = 0), 0) AS repaid,
+           EXISTS (SELECT 1 FROM transaction_tags tt WHERE tt.transaction_id = t.id AND tt.tag = ?) AS is_reimbursable
+    -- Only real spending: not transfers, card payments or rows excluded from analytics.
+    FROM (
+      SELECT * FROM transactions
+      WHERE is_hidden = 0 AND amount < 0 AND ${includedConditionSql}
+        AND LOWER(COALESCE(category, '')) NOT IN ${reimbursementExcludedCategoriesSql}
+    ) t
+    WHERE t.date BETWEEN date(?, ?) AND date(?, '+7 days')
+      AND -t.amount >= ? * 0.95;
+  `, binds(REIMBURSABLE_TAG, credit.date, `-${days} days`, credit.date, creditAmount));
+
+  const near = (a, b, tolerance) => Math.abs(a - b) <= tolerance + 1e-9;
+  const scored = candidates.map((row) => {
+    const expense = -toNumber(row.amount);
+    const room = round2(expense - toNumber(row.repaid));
+    if (room < creditAmount * 0.95) return null;
+    const age = Math.abs(Date.parse(`${credit.date}T00:00:00Z`) - Date.parse(`${row.date}T00:00:00Z`)) / 86400000;
+    let score = 0;
+    let reason = '';
+    if (near(creditAmount, room, 0.005)) {
+      score += 4;
+      reason = toNumber(row.repaid) > 0 ? 'matches the amount still owed' : 'same amount';
+    } else if (age <= SPLIT_WINDOW_DAYS) {
+      // A share of a split bill, allowing a cent of rounding.
+      const share = SPLIT_SHARES.find((n) => near(creditAmount, expense / n, 0.011));
+      if (share) {
+        score += 3;
+        reason = `1/${share} of the bill`;
+      }
+    }
+    if (Number(row.is_reimbursable)) {
+      score += 3;
+      reason = reason ? `${reason}, tagged reimbursable` : 'tagged reimbursable';
+    }
+    // The amount or a tag has to fit; category and recency only rank what does.
+    if (score === 0) return null;
+    if (row.category && row.category === credit.category) score += 1;
+    return {
+      id: Number(row.id),
+      date: row.date,
+      description: row.description,
+      amount: toNumber(row.amount),
+      category: row.category,
+      repaid: round2(row.repaid),
+      reason,
+      score: score - age / days,
+    };
+  }).filter(Boolean);
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 // Positive rows not yet linked to anything, as candidates for linking.

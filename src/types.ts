@@ -269,6 +269,8 @@ export interface TrendPoint {
   month: string;
   total_income: number;
   reimbursed_amount: number;
+  /** Part of reimbursed_amount that arrived in a later month (linked to this month's expenses). */
+  reimbursed_later?: number;
   gross_expenses: number;
   net_expenses: number;
   net_flow: number;

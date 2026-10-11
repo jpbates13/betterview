@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, type LegendPayload } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, LabelList, type LegendPayload } from 'recharts';
 
 type TrendData = {
   month: string; // YYYY-MM
   total_income: number;
   reimbursed_amount: number;
+  reimbursed_later?: number;
   gross_expenses: number;
   net_expenses: number;
 };
@@ -56,6 +57,11 @@ const CustomTooltip = ({ active, payload, label, hiddenBars = {} }: TrendTooltip
                 -${data.reimbursed_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </span>
             </div>
+          )}
+          {!hiddenBars.reimbursed_amount && (data.reimbursed_later ?? 0) > 0 && (
+            <p className="text-xs text-gray-500 pl-5">
+              incl. ${(data.reimbursed_later ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} received in a later month
+            </p>
           )}
 
           {!hiddenBars.net_expenses && (
@@ -128,7 +134,10 @@ export default function SpendingTrendChart({ data, onBarClick }: { data: TrendDa
         />
         <Bar dataKey="total_income" name="Income" hide={hiddenBars.total_income} fill="#10B981" radius={[4, 4, 0, 0]} barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
         <Bar dataKey="net_expenses" name="Net Expenses" hide={hiddenBars.net_expenses} stackId="expenses" fill="#64748B" barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
-        <Bar dataKey="reimbursed_amount" name="Reimbursements" hide={hiddenBars.reimbursed_amount} stackId="expenses" fill="#93C5FD" radius={[4, 4, 0, 0]} barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} />
+        <Bar dataKey="reimbursed_amount" name="Reimbursements" hide={hiddenBars.reimbursed_amount} stackId="expenses" fill="#93C5FD" radius={[4, 4, 0, 0]} barSize={28} onClick={(data) => onBarClick && onBarClick(data.payload.month)} cursor={onBarClick ? 'pointer' : 'default'} >
+          {/* Marks months that include reimbursements received later. */}
+          <LabelList dataKey="reimbursed_later" position="top" fill="#2563EB" fontSize={12} formatter={(value) => (Number(value) > 0 ? '↺' : '')} />
+        </Bar>
       </BarChart>
     </ResponsiveContainer>
   );

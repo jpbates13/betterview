@@ -60,6 +60,12 @@ export function getCategoryNetSpending(
   db: DbApi,
   options?: DateRange & { byMonth?: boolean },
 ): Promise<CategoryNetSpending[]>;
+export function getAnalyticsSql(db: DbApi): Promise<{
+  excludedPatternSql: string;
+  includedConditionSql: string;
+  reimbursementExcludedCategoriesSql: string;
+  reimbursementConditionSql: string;
+}>;
 export function getSpendingByCategory(db: DbApi, range?: DateRange): Promise<CategorySpending>;
 export function getSpendingTrend(db: DbApi, range?: DateRange): Promise<TrendPoint[]>;
 export function getDailySpending(db: DbApi, range?: DateRange): Promise<DailySpending[]>;

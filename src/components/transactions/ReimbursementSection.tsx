@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link2, Unlink, HandCoins } from 'lucide-react';
 import { useDatabase } from '../../useDatabase';
-import { getLinkedReimbursements, getReimbursementStatus, getUnlinkedCredits, linkReimbursement } from '../../db/features.js';
+import {
+  getLinkedReimbursements, getReimbursementStatus, getUnlinkedCredits, linkReimbursement, suggestReimbursementLinks,
+  type ReimbursementSuggestion,
+} from '../../db/features.js';
 import { getTransactions } from '../../dbQueries.js';
 import { errorMessage } from '../planning/shared';
 import type { CreditRow, Transaction } from '../../types';
@@ -32,6 +35,7 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
   const [candidates, setCandidates] = useState<CreditRow[]>([]);
   const [trackedOutstanding, setTrackedOutstanding] = useState<number | null>(null);
   const [linkedExpense, setLinkedExpense] = useState<Transaction | null>(null);
+  const [suggestions, setSuggestions] = useState<ReimbursementSuggestion[]>([]);
   const [reimbursesId, setReimbursesId] = useState<number | null>(transaction.reimburses_id ?? null);
   const [chosenCredit, setChosenCredit] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
@@ -60,7 +64,10 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
           if (cancelled) return;
           setLinkedExpense(rows[0] ?? null);
         } else {
+          const found = await suggestReimbursementLinks(db, transaction.id);
+          if (cancelled) return;
           setLinkedExpense(null);
+          setSuggestions(found);
         }
         if (!cancelled) setIsLoaded(true);
       } catch (err) {
@@ -90,7 +97,8 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
     }
   };
 
-  if (!isExpense && transaction.amount > 0 && !reimbursesId) {
+  // An unlinked credit only gets this section when something looks like what it pays back.
+  if (!isExpense && !reimbursesId && suggestions.length === 0) {
     return null;
   }
   if (transaction.amount === 0) return null;
@@ -107,7 +115,33 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
       {error && <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded px-2 py-1" role="alert">{error}</p>}
       {!isLoaded && !error && <p className="text-xs text-gray-500">Loading…</p>}
 
-      {isLoaded && !isExpense && (
+      {isLoaded && !isExpense && !reimbursesId && (
+        <div className="space-y-1.5">
+          <p className="text-xs text-gray-500">
+            Does this pay back an earlier expense? Linking counts it in that expense's month and category.
+          </p>
+          {suggestions.map((suggestion) => (
+            <div key={suggestion.id} className="flex items-start justify-between gap-2 text-sm">
+              <div className="min-w-0">
+                <p className="font-medium text-gray-900 truncate">{suggestion.description}</p>
+                <p className="text-xs text-gray-500">
+                  {suggestion.date} · {money(suggestion.amount)} · {suggestion.reason}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => runLink(transaction.id, suggestion.id)}
+                className="inline-flex items-center gap-1 text-xs text-primary-700 border border-primary-100 bg-primary-50 rounded px-2 py-1 hover:bg-primary-100 shrink-0"
+              >
+                <Link2 className="h-3 w-3" /> Link
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {isLoaded && !isExpense && reimbursesId && (
         linkedExpense ? (
           <div className="flex items-start justify-between gap-2 text-sm">
             <div className="min-w-0">
