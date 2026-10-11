@@ -40,6 +40,28 @@ async function findDriveDbFile(accessToken) {
   return file || null;
 }
 
+// Stable id for the signed-in Google account, used to tell whose data the local DB holds.
+export async function getDriveUserId(accessToken) {
+  if (!accessToken) {
+    throw new Error('Missing Google Drive access token.');
+  }
+
+  const response = await fetch(`https://www.googleapis.com/drive/v3/about?fields=user(permissionId)`, {
+    method: 'GET',
+    headers: {
+      ...authHeaders(accessToken),
+    },
+  });
+
+  await ensureOk(response, 'Drive account lookup');
+  const payload = await response.json();
+  const userId = payload?.user?.permissionId;
+  if (!userId) {
+    throw new Error('Drive account lookup returned no user id.');
+  }
+  return String(userId);
+}
+
 export async function downloadDbFromDrive(accessToken) {
   if (!accessToken) {
     throw new Error('Missing Google Drive access token.');

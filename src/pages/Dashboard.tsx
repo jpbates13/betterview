@@ -5,8 +5,7 @@ import DataTable from '../components/DataTable';
 import TransactionModal from '../components/TransactionModal';
 import SplitTransactionModal from '../components/SplitTransactionModal';
 import { useDatabase } from '../DatabaseContext.jsx';
-import { useDriveSync } from '../DriveSyncContext.jsx';
-import { useAutoSync } from '../useAutoSync.js';
+import { useAutoSyncStatus } from '../useAutoSync.js';
 import {
   bootstrapSchema,
   createTransaction,
@@ -24,8 +23,7 @@ const ONBOARDING_COMPLETED_KEY = 'betterview.onboarding.completed.v1';
 
 export default function Dashboard() {
   const { db, dbName, isReady, error: dbError, notifyDataChanged, lastMutationTime, triggerMutation } = useDatabase() as any;
-  const { accessToken, clearAccessToken } = useDriveSync() as any;
-  const { syncStatus } = useAutoSync(lastMutationTime, accessToken, db);
+  const { syncStatus, logout } = useAutoSyncStatus() as any;
 
   const [transactions, setTransactions] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -309,7 +307,7 @@ export default function Dashboard() {
           </div>
 
           <button
-            onClick={clearAccessToken}
+            onClick={logout}
             className="inline-flex items-center justify-center px-4 py-2 rounded-lg border font-medium transition-colors shadow-sm bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
             title="Logout from Google Drive"
           >

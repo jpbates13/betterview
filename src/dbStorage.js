@@ -47,3 +47,15 @@ export async function saveDbBytesToBrowser(bytes) {
 export async function clearDbFromBrowser() {
   await localforage.removeItem(DB_STORAGE_KEY);
 }
+
+const DB_OWNER_STORAGE_KEY = 'betterview_local_db_owner';
+
+// Google account id whose data the browser-saved DB currently holds.
+export async function loadDbOwnerFromBrowser() {
+  const owner = await localforage.getItem(DB_OWNER_STORAGE_KEY);
+  return owner ? String(owner) : null;
+}
+
+export async function saveDbOwnerToBrowser(owner) {
+  await localforage.setItem(DB_OWNER_STORAGE_KEY, String(owner));
+}

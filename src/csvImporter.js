@@ -1,5 +1,5 @@
 import Papa from 'papaparse';
-import { applyRulesToImportedTransactions, bootstrapSchema, getRules } from './dbQueries.js';
+import { applyRulesToImportedTransactions, bootstrapSchema, ensureDedupeIndex, getRules } from './dbQueries.js';
 import { saveDbToBrowser } from './dbStorage.js';
 
 const toSql = (value) => {
@@ -169,10 +169,7 @@ export async function importCsvToDatabase(file, db) {
   if (!db) throw new Error('Database is not initialized.');
 
   await bootstrapSchema(db);
-  await db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_date_desc_amount
-    ON transactions (date, description, amount);
-  `);
+  await ensureDedupeIndex(db);
 
   const parsed = await parseCsv(file);
   const headers = parsed.meta?.fields || [];
