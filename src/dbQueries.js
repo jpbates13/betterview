@@ -207,6 +207,11 @@ const getAnalyticsSqlFragments = async (db) => {
   };
 };
 
+// SQL conditions for spending analytics (see getAnalyticsSqlFragments).
+export async function getAnalyticsSql(db) {
+  return getAnalyticsSqlFragments(db);
+}
+
 // SQL condition that is true for rows counted in spending analytics.
 export async function getAnalyticsInclusionSql(db) {
   return (await getAnalyticsSqlFragments(db)).includedConditionSql;
@@ -1321,23 +1326,36 @@ const dateRange = (startDate, endDate) => {
   return { clause: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
 };
 
+// One row per amount the spending analytics count. Expenses and income sit on their own
+// date; a reimbursement linked to an expense moves to that expense's date and category
+// (received_date keeps when the money actually arrived). `amount` carries real cash
+// movements on their real dates, for net flow.
+const spendingEventsSql = ({ includedConditionSql, reimbursementConditionSql }) => `
+  SELECT date, date AS received_date, category, amount,
+    CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END AS income,
+    CASE WHEN amount < 0 AND ${includedConditionSql} THEN -amount ELSE 0 END AS gross,
+    0 AS reimbursed
+  FROM transactions
+  WHERE is_hidden = 0
+  UNION ALL
+  SELECT COALESCE(e.date, r.date) AS date, r.date AS received_date, COALESCE(e.category, r.category) AS category,
+    0 AS amount, 0 AS income, 0 AS gross, r.amount AS reimbursed
+  FROM (SELECT * FROM transactions WHERE is_hidden = 0 AND ${reimbursementConditionSql}) r
+  LEFT JOIN transactions e ON e.id = r.reimburses_id
+`;
+
 export async function getKpis(db, month) {
-  const {
-    includedConditionSql,
-    reimbursementConditionSql,
-  } = await getAnalyticsSqlFragments(db);
+  const events = spendingEventsSql(await getAnalyticsSqlFragments(db));
 
   const rows = await queryRows(db, `
     SELECT
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS total_reimbursements,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
+      COALESCE(SUM(income), 0) AS total_income,
+      COALESCE(SUM(reimbursed), 0) AS total_reimbursements,
+      COALESCE(SUM(gross), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
-    FROM transactions
-    WHERE strftime('%Y-%m', date) = ?
-      AND is_hidden = 0;
+    FROM (${events})
+    WHERE strftime('%Y-%m', date) = ?;
   `, binds(month));
-
   const row = rows[0] || {};
   const grossExpenses = round2(row.gross_expenses || 0);
   const reimbursements = round2(row.total_reimbursements || 0);
@@ -1357,29 +1375,20 @@ export async function getKpis(db, month) {
  * (credits linked to an expense count in that expense's category; other credits
  * count in their own category) and net = gross - reimbursed. Uses the same
  * reimbursement rule as the KPI and trend totals, so the categories add up to them.
- * With `byMonth`, rows are also split by the transaction's month.
+ * A linked reimbursement counts in the expense's month. With `byMonth`, rows are also
+ * split by month.
  */
 export async function getCategoryNetSpending(db, { startDate, endDate, byMonth = false } = {}) {
-  const { includedConditionSql, reimbursementConditionSql } = await getAnalyticsSqlFragments(db);
+  const events = spendingEventsSql(await getAnalyticsSqlFragments(db));
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
   const monthSql = byMonth ? "strftime('%Y-%m', date)" : "''";
 
   const rows = await queryRows(db, `
-    SELECT month, category, SUM(gross) AS gross, SUM(reimbursed) AS reimbursed FROM (
-      SELECT ${monthSql} AS month, category, -amount AS gross, 0 AS reimbursed
-      FROM transactions
-      WHERE is_hidden = 0 AND amount < 0 AND ${includedConditionSql} ${dateClause}
-      UNION ALL
-      SELECT r.month, COALESCE(e.category, r.category) AS category, 0 AS gross, r.amount AS reimbursed
-      FROM (
-        SELECT ${monthSql} AS month, category, amount, reimburses_id
-        FROM transactions
-        WHERE is_hidden = 0 AND ${reimbursementConditionSql} ${dateClause}
-      ) r
-      LEFT JOIN transactions e ON e.id = r.reimburses_id
-    )
-    GROUP BY month, category;
-  `, [...dateParams, ...dateParams]);
+    SELECT ${monthSql} AS month, category, SUM(gross) AS gross, SUM(reimbursed) AS reimbursed
+    FROM (${events})
+    WHERE (gross > 0 OR reimbursed > 0) ${dateClause}
+    GROUP BY 1, category;
+  `, dateParams);
 
   return rows.map((row) => {
     const gross = round2(row.gross);
@@ -1419,23 +1428,19 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
 }
 
 export async function getSpendingTrend(db, { startDate, endDate } = {}) {
-  const {
-    includedConditionSql,
-    reimbursementConditionSql,
-  } = await getAnalyticsSqlFragments(db);
-
+  const events = spendingEventsSql(await getAnalyticsSqlFragments(db));
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
-  const whereClause = `WHERE is_hidden = 0 ${dateClause}`;
 
   const rows = await queryRows(db, `
     SELECT
       strftime('%Y-%m', date) AS month,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
+      COALESCE(SUM(income), 0) AS total_income,
+      COALESCE(SUM(reimbursed), 0) AS reimbursed_amount,
+      COALESCE(SUM(CASE WHEN strftime('%Y-%m', received_date) > strftime('%Y-%m', date) THEN reimbursed ELSE 0 END), 0) AS reimbursed_later,
+      COALESCE(SUM(gross), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
-    FROM transactions
-    ${whereClause}
+    FROM (${events})
+    WHERE 1 = 1 ${dateClause}
     GROUP BY month
     ORDER BY month ASC;
   `, dateParams);
@@ -1449,6 +1454,8 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
         month: row.month,
         total_income: round2(row.total_income || 0),
         reimbursed_amount: reimbursedAmount,
+        // Part of reimbursed_amount that arrived in a later month.
+        reimbursed_later: round2(row.reimbursed_later || 0),
         gross_expenses: grossExpenses,
         net_expenses: round2(grossExpenses - reimbursedAmount),
         net_flow: round2(row.net_flow || 0),
@@ -1457,22 +1464,17 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
 }
 
 export async function getDailySpending(db, { startDate, endDate } = {}) {
-  const {
-    includedConditionSql,
-    reimbursementConditionSql,
-  } = await getAnalyticsSqlFragments(db);
-
+  const events = spendingEventsSql(await getAnalyticsSqlFragments(db));
   const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
-  const whereClause = `WHERE is_hidden = 0 ${dateClause}`;
 
   const rows = await queryRows(db, `
     SELECT
       date AS day,
-      COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND reimburses_id IS NULL AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
-      COALESCE(SUM(CASE WHEN ${reimbursementConditionSql} THEN amount ELSE 0 END), 0) AS reimbursed_amount,
-      COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses
-    FROM transactions
-    ${whereClause}
+      COALESCE(SUM(income), 0) AS total_income,
+      COALESCE(SUM(reimbursed), 0) AS reimbursed_amount,
+      COALESCE(SUM(gross), 0) AS gross_expenses
+    FROM (${events})
+    WHERE 1 = 1 ${dateClause}
     GROUP BY day
     ORDER BY day ASC;
   `, dateParams);

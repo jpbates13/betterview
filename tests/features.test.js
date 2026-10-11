@@ -196,3 +196,58 @@ describe('possible duplicates', () => {
     expect(await f.getPossibleDuplicates(db)).toHaveLength(1);
   });
 });
+
+describe('reimbursements received in a later month', () => {
+  it('count in the expense month when linked, and stay in the month received when not', async () => {
+    const db = await freshDb();
+    const { id: dinner } = await tx(db, '2026-03-28', 'DINNER', -120, 'Dining');
+    const { id: payback } = await tx(db, '2026-04-03', 'VENMO FROM SAM', 60, 'Reimbursement');
+    await tx(db, '2026-04-05', 'GROCER', -50, 'Groceries');
+    await tx(db, '2026-04-06', 'GROCER REFUND', 10, 'Groceries');
+    await f.linkReimbursement(db, payback, dinner);
+
+    const march = await q.getKpis(db, '2026-03');
+    const april = await q.getKpis(db, '2026-04');
+    expect([march.gross_expenses, march.total_reimbursements, march.net_expenses]).toEqual([120, 60, 60]);
+    expect([april.gross_expenses, april.total_reimbursements, april.net_expenses]).toEqual([50, 10, 40]);
+    // Cash flow keeps the real deposit date.
+    expect(april.net_flow).toBe(20);
+
+    const trend = await q.getSpendingTrend(db, { startDate: '2026-03-01', endDate: '2026-04-30' });
+    expect(trend.map((m) => [m.month, m.net_expenses, m.reimbursed_later])).toEqual([['2026-03', 60, 60], ['2026-04', 40, 0]]);
+
+    const marchCats = await q.getSpendingByCategory(db, { startDate: '2026-03-01', endDate: '2026-03-31' });
+    expect(marchCats.categories.map((c) => [c.category, c.net])).toEqual([['Dining', 60]]);
+    const aprilCats = await q.getSpendingByCategory(db, { startDate: '2026-04-01', endDate: '2026-04-30' });
+    expect(aprilCats.categories.map((c) => [c.category, c.net])).toEqual([['Groceries', 40]]);
+
+    const daily = await q.getDailySpending(db, { startDate: '2026-03-01', endDate: '2026-04-30' });
+    expect(daily.find((d) => d.date === '2026-03-28').net_expenses).toBe(60);
+
+    await f.setBudget(db, 'Dining', 100);
+    const [budget] = await f.getBudgetProgress(db, '2026-03', '2026-03-31');
+    expect(budget.spent).toBe(60);
+  });
+
+  it('suggests the expense a credit most likely pays back', async () => {
+    const db = await freshDb();
+    const { id: dinner } = await tx(db, '2026-03-28', 'DINNER', -120, 'Dining');
+    const { id: hotel } = await tx(db, '2026-02-10', 'HOTEL', -300, 'Travel');
+    await f.addTagToTransactions(db, [hotel], 'reimbursable');
+    await tx(db, '2026-03-30', 'COFFEE', -5, 'Dining');
+    const { id: venmo } = await tx(db, '2026-04-03', 'VENMO FROM SAM', 40, 'Reimbursement');
+    const { id: work } = await tx(db, '2026-04-04', 'EMPLOYER EXPENSES', 300, 'Reimbursement');
+
+    const forVenmo = await f.suggestReimbursementLinks(db, venmo);
+    expect(forVenmo[0]).toMatchObject({ id: dinner, reason: '1/3 of the bill' });
+    expect(forVenmo.some((s) => s.description === 'COFFEE')).toBe(false);
+
+    const forWork = await f.suggestReimbursementLinks(db, work);
+    expect(forWork[0]).toMatchObject({ id: hotel, reason: 'same amount, tagged reimbursable' });
+
+    // Once the hotel is fully paid back it is no longer suggested.
+    await f.linkReimbursement(db, work, hotel);
+    const { id: another } = await tx(db, '2026-04-05', 'EMPLOYER EXPENSES', 300, 'Reimbursement');
+    expect((await f.suggestReimbursementLinks(db, another)).some((s) => s.id === hotel)).toBe(false);
+  });
+});

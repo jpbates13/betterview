@@ -54,3 +54,19 @@ export function getCategoryNames(db: DbApi): Promise<string[]>;
 export function transactionsToCsv(rows: ReadonlyArray<Pick<Transaction, 'date' | 'description' | 'merchant' | 'amount' | 'category' | 'account' | 'tags'>>): string;
 export function getPossibleDuplicates(db: DbApi): Promise<DuplicatePair[]>;
 export function monthBounds(month: string): { start: string; end: string; days: number };
+
+export interface ReimbursementSuggestion {
+  id: number;
+  date: string;
+  description: string;
+  amount: number;
+  category: string | null;
+  repaid: number;
+  reason: string;
+  score: number;
+}
+export function suggestReimbursementLinks(
+  db: DbApi,
+  creditId: number,
+  options?: { days?: number; limit?: number },
+): Promise<ReimbursementSuggestion[]>;
