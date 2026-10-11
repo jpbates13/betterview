@@ -93,7 +93,34 @@ describe('tags and reimbursements', () => {
     const { id: refund } = await tx(db, '2026-03-06', 'VENMO', 60, 'Reimbursement');
     await f.linkReimbursement(db, refund, dinner);
     const { categories } = await q.getSpendingByCategory(db, { startDate: '2026-03-01', endDate: '2026-03-31' });
-    expect(categories).toEqual([{ category: 'Dining', total: -60 }]);
+    expect(categories).toEqual([{ category: 'Dining', total: -60, gross: 120, reimbursed: 60, net: 60 }]);
+  });
+
+  it('nets same-category refunds too, keeps fully reimbursed categories visible, and matches the KPI totals', async () => {
+    const db = await freshDb();
+    await tx(db, '2026-03-02', 'GROCER', -100, 'Groceries');
+    await tx(db, '2026-03-03', 'GROCER REFUND', 25, 'Groceries');
+    const { id: flight } = await tx(db, '2026-03-04', 'AIRLINE', -300, 'Travel');
+    const { id: payback } = await tx(db, '2026-03-20', 'EMPLOYER', 300, 'Income');
+    await tx(db, '2026-03-25', 'PAYCHECK', 2000, 'Income');
+    await f.linkReimbursement(db, payback, flight);
+
+    const range = { startDate: '2026-03-01', endDate: '2026-03-31' };
+    const breakdown = await q.getSpendingByCategory(db, range);
+    expect(breakdown.categories).toEqual([{ category: 'Groceries', total: -75, gross: 100, reimbursed: 25, net: 75 }]);
+    expect(breakdown.reimbursed_categories).toEqual([{ category: 'Travel', total: -0, gross: 300, reimbursed: 300, net: 0 }]);
+    expect(breakdown.total_gross_expenses).toBe(400);
+    expect(breakdown.total_net_expenses).toBe(75);
+
+    // A linked payback counts as a reimbursement even in an excluded category like Income.
+    const kpis = await q.getKpis(db, '2026-03');
+    expect(kpis.net_expenses).toBe(75);
+    expect(kpis.total_income).toBe(2000); // the linked payback isn't income
+    expect((await f.getYearSummary(db, 2026)).income).toBe(2000);
+    const [trend] = await q.getSpendingTrend(db, range);
+    expect(trend.net_expenses).toBe(75);
+    const [budgetMonth] = await f.getMonthlySavingsRate(db, { months: 1, today: '2026-03-31' });
+    expect(budgetMonth.spent).toBe(75);
   });
 });
 

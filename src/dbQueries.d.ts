@@ -1,5 +1,6 @@
 import type {
   AnalyticsSettingsConfig,
+  CategoryNetSpending,
   CategorySpending,
   DailySpending,
   DateRange,
@@ -55,6 +56,10 @@ export function splitTransaction(
 export function undoSplitTransaction(db: DbApi, transactionId: number): Promise<UndoSplitResult>;
 
 export function getKpis(db: DbApi, month: string): Promise<Kpis>;
+export function getCategoryNetSpending(
+  db: DbApi,
+  options?: DateRange & { byMonth?: boolean },
+): Promise<CategoryNetSpending[]>;
 export function getSpendingByCategory(db: DbApi, range?: DateRange): Promise<CategorySpending>;
 export function getSpendingTrend(db: DbApi, range?: DateRange): Promise<TrendPoint[]>;
 export function getDailySpending(db: DbApi, range?: DateRange): Promise<DailySpending[]>;

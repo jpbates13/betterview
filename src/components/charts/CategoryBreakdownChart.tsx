@@ -1,15 +1,11 @@
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, type PieSectorDataItem } from 'recharts';
 
-type CategoryData = {
-  category: string;
-  total: number;
-};
+import type { CategorySpending, CategoryTotal } from '../../types';
 
-type BreakdownData = {
-  categories: CategoryData[];
-  total_gross_expenses: number;
-  total_net_expenses: number;
-};
+type CategoryData = CategoryTotal;
+type BreakdownData = CategorySpending;
+
+const money = (value: number, digits = 2) => `$${value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 
 type CategoryBreakdownChartProps = {
   data: BreakdownData;
@@ -30,15 +26,26 @@ type CategoryTooltipProps = {
 const CustomTooltip = ({ active, payload }: CategoryTooltipProps) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
+    const reimbursed = data.reimbursed ?? 0;
     return (
-      <div className="bg-white rounded-lg shadow-md p-3 border border-gray-100 min-w-[160px]">
+      <div className="bg-white rounded-lg shadow-md p-3 border border-gray-100 min-w-[180px]">
         <p className="font-medium text-gray-900 mb-2 truncate max-w-[200px]" title={data.category}>{data.category}</p>
         <div className="flex items-center justify-between text-sm w-full">
-          <span className="text-gray-500">Amount:</span>
-          <span className="font-medium text-gray-900 ml-3">
-            ${data.absTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </span>
+          <span className="text-gray-500">Net:</span>
+          <span className="font-medium text-gray-900 ml-3">{money(data.absTotal)}</span>
         </div>
+        {reimbursed > 0 && (
+          <>
+            <div className="flex items-center justify-between text-sm mt-1 w-full">
+              <span className="text-gray-500">Gross:</span>
+              <span className="text-gray-700 ml-3">{money(data.gross ?? data.absTotal)}</span>
+            </div>
+            <div className="flex items-center justify-between text-sm mt-1 w-full">
+              <span className="text-gray-500">Reimbursed:</span>
+              <span className="text-emerald-700 ml-3">−{money(reimbursed)}</span>
+            </div>
+          </>
+        )}
         <div className="flex items-center justify-between text-sm mt-1 w-full">
           <span className="text-gray-500">Share:</span>
           <span className="font-medium text-gray-900 ml-3">
@@ -63,9 +70,11 @@ export default function CategoryBreakdownChart({ data, onCategoryClick, total_in
     const top = sortedData.slice(0, topCount);
     const other = sortedData.slice(topCount);
     const otherTotal = other.reduce((sum, item) => sum + Math.abs(item.total), 0);
+    const otherGross = other.reduce((sum, item) => sum + (item.gross ?? Math.abs(item.total)), 0);
+    const otherReimbursed = other.reduce((sum, item) => sum + (item.reimbursed ?? 0), 0);
     processed = [
       ...top.map(i => ({...i, absTotal: Math.abs(i.total)})), 
-      { category: 'Other', total: -otherTotal, absTotal: otherTotal }
+      { category: 'Other', total: -otherTotal, absTotal: otherTotal, gross: otherGross, reimbursed: otherReimbursed }
     ];
   } else {
     processed = sortedData.map(i => ({...i, absTotal: Math.abs(i.total)}));
@@ -131,6 +140,24 @@ export default function CategoryBreakdownChart({ data, onCategoryClick, total_in
           </div>
         ))}
       </div>
+      {(data?.reimbursed_categories?.length ?? 0) > 0 && (
+        <div className="pt-3 text-xs text-gray-500 text-center">
+          <span className="font-medium text-gray-600">Covered by reimbursements: </span>
+          {data.reimbursed_categories!.map((entry, index) => {
+            const net = entry.net ?? 0;
+            return (
+              <span key={entry.category}>
+                {index > 0 && ', '}
+                <button type="button" onClick={() => onCategoryClick?.(entry.category)} className="hover:underline">
+                  {entry.category}
+                </button>
+                {' '}({money(entry.gross ?? 0, 0)} spent, {money(entry.reimbursed ?? 0, 0)} back
+                {net < 0 && <span className="text-emerald-700">, net {money(-net, 0)} in</span>})
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

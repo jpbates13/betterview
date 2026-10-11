@@ -240,12 +240,28 @@ export interface Kpis {
 
 export interface CategoryTotal {
   category: string;
+  /** Net spending as a negative number, like the transactions. */
   total: number;
+  gross?: number;
+  reimbursed?: number;
+  net?: number;
+}
+
+export interface CategoryNetSpending {
+  month?: string;
+  category: string;
+  gross: number;
+  reimbursed: number;
+  net: number;
 }
 
 export interface CategorySpending {
+  /** Categories with net spending, largest first. */
   categories: CategoryTotal[];
+  /** Categories whose reimbursements covered all their spending or more. */
+  reimbursed_categories?: CategoryTotal[];
   total_gross_expenses: number;
+  total_reimbursed?: number;
   total_net_expenses: number;
 }
 
