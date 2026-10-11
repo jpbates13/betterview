@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link2, Unlink, HandCoins } from 'lucide-react';
+import LinkPicker from './LinkPicker';
 import { useDatabase } from '../../useDatabase';
 import {
-  getLinkedReimbursements, getReimbursementStatus, getUnlinkedCredits, linkReimbursement, suggestReimbursementLinks,
+  getLinkedReimbursements, getReimbursementStatus, linkReimbursement, suggestReimbursementLinks,
   type ReimbursementSuggestion,
 } from '../../db/features.js';
 import { getTransactions } from '../../dbQueries.js';
@@ -15,6 +16,7 @@ interface ReimbursementSectionProps {
 
 const money = (n: number) => `$${Math.abs(n).toFixed(2)}`;
 const round2 = (n: number) => Math.round(n * 100) / 100;
+const pickButtonClass = 'inline-flex items-center gap-1 text-sm text-primary-700 hover:text-primary-800 font-medium';
 
 const toCredit = (row: CreditRow): CreditRow => ({
   id: Number(row.id),
@@ -32,12 +34,11 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
   const isExpense = transaction.amount < 0;
 
   const [linked, setLinked] = useState<CreditRow[]>([]);
-  const [candidates, setCandidates] = useState<CreditRow[]>([]);
   const [trackedOutstanding, setTrackedOutstanding] = useState<number | null>(null);
   const [linkedExpense, setLinkedExpense] = useState<Transaction | null>(null);
   const [suggestions, setSuggestions] = useState<ReimbursementSuggestion[]>([]);
   const [reimbursesId, setReimbursesId] = useState<number | null>(transaction.reimburses_id ?? null);
-  const [chosenCredit, setChosenCredit] = useState('');
+  const [isPicking, setIsPicking] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [isLoaded, setIsLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -49,14 +50,12 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
     (async () => {
       try {
         if (isExpense) {
-          const [linkedRows, candidateRows, statusRows] = await Promise.all([
+          const [linkedRows, statusRows] = await Promise.all([
             getLinkedReimbursements(db, transaction.id),
-            getUnlinkedCredits(db, { aroundDate: transaction.date }),
             getReimbursementStatus(db),
           ]);
           if (cancelled) return;
           setLinked(linkedRows.map(toCredit));
-          setCandidates(candidateRows.map(toCredit));
           const status = statusRows.find((row) => Number(row.id) === transaction.id);
           setTrackedOutstanding(status ? Number(status.outstanding) : null);
         } else if (reimbursesId) {
@@ -88,7 +87,7 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
       notifyDataChanged();
       triggerMutation();
       if (!isExpense) setReimbursesId(expenseId);
-      setChosenCredit('');
+      setIsPicking(false);
       setReloadKey((k) => k + 1);
     } catch (err) {
       setError(errorMessage(err, 'Could not update the link.'));
@@ -97,10 +96,6 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
     }
   };
 
-  // An unlinked credit only gets this section when something looks like what it pays back.
-  if (!isExpense && !reimbursesId && suggestions.length === 0) {
-    return null;
-  }
   if (transaction.amount === 0) return null;
 
   const repaid = round2(linked.reduce((sum, row) => sum + row.amount, 0));
@@ -118,7 +113,7 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
       {isLoaded && !isExpense && !reimbursesId && (
         <div className="space-y-1.5">
           <p className="text-xs text-gray-500">
-            Does this pay back an earlier expense? Linking counts it in that expense's month and category.
+            Does this pay back an expense? Linking counts it in that expense's month and category.
           </p>
           {suggestions.map((suggestion) => (
             <div key={suggestion.id} className="flex items-start justify-between gap-2 text-sm">
@@ -138,6 +133,13 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
               </button>
             </div>
           ))}
+          {isPicking ? (
+            <LinkPicker side="expense" nearDate={transaction.date} excludeId={transaction.id} busy={busy} onPick={(id) => runLink(transaction.id, id)} />
+          ) : (
+            <button type="button" onClick={() => setIsPicking(true)} className={pickButtonClass}>
+              <Link2 className="h-3.5 w-3.5" /> {suggestions.length > 0 ? 'Pick a different expense' : 'Pick the expense it pays back'}
+            </button>
+          )}
         </div>
       )}
 
@@ -192,32 +194,12 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
               ))}
             </ul>
           )}
-          {candidates.length > 0 ? (
-            <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                aria-label="Credit to link"
-                className="flex-1 min-w-0 px-2 py-1.5 border border-gray-200 rounded-lg text-sm bg-white"
-                value={chosenCredit}
-                onChange={(e) => setChosenCredit(e.target.value)}
-              >
-                <option value="">Link a refund or repayment…</option>
-                {candidates.map((row) => (
-                  <option key={row.id} value={row.id}>
-                    {row.date} · +{money(row.amount)} · {row.description}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                disabled={busy || !chosenCredit}
-                onClick={() => runLink(Number(chosenCredit), transaction.id)}
-                className="inline-flex items-center justify-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:opacity-60"
-              >
-                <Link2 className="h-3.5 w-3.5" /> Link
-              </button>
-            </div>
+          {isPicking ? (
+            <LinkPicker side="credit" nearDate={transaction.date} excludeId={transaction.id} busy={busy} onPick={(id) => runLink(id, transaction.id)} />
           ) : (
-            <p className="text-xs text-gray-500">No unlinked credits within 60 days of this expense.</p>
+            <button type="button" onClick={() => setIsPicking(true)} className={pickButtonClass}>
+              <Link2 className="h-3.5 w-3.5" /> Link a refund or repayment
+            </button>
           )}
         </>
       )}
