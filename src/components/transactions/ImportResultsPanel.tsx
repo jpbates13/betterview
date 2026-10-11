@@ -28,6 +28,14 @@ const Stat = ({ label, value, tone = 'gray' }: { label: string; value: number; t
 export default function ImportResultsPanel({ summary, isFilteringToBatch, onToggleFilter, onUndo, onDismiss }: ImportResultsPanelProps) {
   const [isUndoing, setIsUndoing] = useState(false);
   const [showSkipped, setShowSkipped] = useState(summary.skipped.length > 0 && summary.skipped.length <= 5);
+  // "unreadable date "x"" and "unreadable date "y"" are one kind of problem; show each kind once.
+  const skippedKinds = [...summary.skipped.reduce((kinds, item) => {
+    const kind = item.reason.replace(/\s*".*"$/, '');
+    const entry = kinds.get(kind) ?? { kind, count: 0, example: item.reason, line: item.line };
+    entry.count += 1;
+    return kinds.set(kind, entry);
+  }, new Map<string, { kind: string, count: number, example: string, line: number }>()).values()]
+    .sort((a, b) => b.count - a.count);
 
   const handleUndo = async () => {
     setIsUndoing(true);
@@ -80,6 +88,14 @@ export default function ImportResultsPanel({ summary, isFilteringToBatch, onTogg
             {summary.skipped.length} line{summary.skipped.length === 1 ? ' was' : 's were'} skipped
             {showSkipped ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </button>
+          <ul className="px-3 pb-2 text-sm text-amber-900 space-y-0.5">
+            {skippedKinds.slice(0, 3).map((kind) => (
+              <li key={kind.kind}>
+                {kind.count} × {kind.kind}
+                {kind.example !== kind.kind && <span className="text-amber-700"> (e.g. line {kind.line}: {kind.example})</span>}
+              </li>
+            ))}
+          </ul>
           {showSkipped && (
             <ul className="max-h-48 overflow-y-auto border-t border-amber-200 divide-y divide-amber-100 text-sm">
               {summary.skipped.map((item) => (

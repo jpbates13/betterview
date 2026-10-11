@@ -620,7 +620,7 @@ export default function Dashboard() {
         <div className="text-center">
           <UploadCloud className="h-8 w-8 text-gray-500 mx-auto mb-2" />
           <p className="text-sm font-medium text-gray-800">Drag and drop a CSV, or click to browse</p>
-          <p className="text-xs text-gray-500 mt-1">Overlapping uploads are deduplicated by date + description + amount.</p>
+          <p className="text-xs text-gray-500 mt-1">Re-importing overlapping files is safe: rows already imported are skipped, and repeats within a file (two identical fares in a day) are kept.</p>
         </div>
       </label>
 
