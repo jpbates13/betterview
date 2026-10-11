@@ -5,13 +5,18 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const allowedHost = env.VITE_ALLOWED_HOST
+  // Tailscale serve forwards requests with the machine's *.ts.net name as the Host header.
+  const allowedHosts = ['.ts.net', ...(env.VITE_ALLOWED_HOST ? [env.VITE_ALLOWED_HOST] : [])]
 
   return {
     plugins: [react(), tailwindcss()],
     server: {
       port: 9445,
-      ...(allowedHost ? { allowedHosts: [allowedHost] } : {}),
+      allowedHosts,
+    },
+    preview: {
+      port: 9445,
+      allowedHosts,
     },
   }
 })
