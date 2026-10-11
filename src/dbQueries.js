@@ -105,8 +105,10 @@ const buildLikeConditionSql = (columnSql, keywords, negate = false) => {
 
   const operator = negate ? 'NOT LIKE' : 'LIKE';
   const joiner = negate ? ' AND ' : ' OR ';
+  // Escape LIKE wildcards so keywords containing % or _ match literally.
+  const escapeLike = (keyword) => keyword.replace(/[\\%_]/g, (char) => `\\${char}`);
   return normalized
-    .map((keyword) => `${columnSql} ${operator} ${sqlValue(`%${keyword}%`)}`)
+    .map((keyword) => `${columnSql} ${operator} ${sqlValue(`%${escapeLike(keyword)}%`)} ESCAPE '\\'`)
     .join(joiner);
 };
 
@@ -803,7 +805,21 @@ export async function createTransaction(db, tx) {
   return { status: 'success', id };
 }
 
+// Split halves must stay in step with their hidden original; undo the split to change them.
+const assertNotSplitChild = async (db, transactionId) => {
+  const parentId = await scalar(
+    db,
+    `SELECT split_parent_id FROM transactions WHERE id = ${sqlValue(transactionId)};`,
+    null,
+  );
+  if (parentId !== null) {
+    throw new Error('This transaction is part of a split. Undo the split before editing or deleting it.');
+  }
+};
+
 export async function updateTransaction(db, transactionId, tx) {
+  await assertNotSplitChild(db, transactionId);
+
   await db.exec(`
     UPDATE transactions
     SET
@@ -822,6 +838,8 @@ export async function updateTransaction(db, transactionId, tx) {
 }
 
 export async function deleteTransaction(db, transactionId) {
+  await assertNotSplitChild(db, transactionId);
+
   await db.exec(`DELETE FROM transactions WHERE id = ${sqlValue(transactionId)};`);
   const affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
 
