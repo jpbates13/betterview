@@ -1,4 +1,22 @@
 import { saveDbToBrowser } from './dbStorage.js';
+import {
+  binds,
+  changes,
+  inTransaction,
+  lastInsertId,
+  normalizeLower,
+  normalizeText,
+  placeholders,
+  queryRows,
+  randomKey,
+  round2,
+  rowify,
+  scalar,
+  sqlValue,
+  toNumber,
+} from './db/sql.js';
+import { getMerchantRules, refreshMerchants } from './db/merchants-store.js';
+import { resolveMerchant } from './db/merchants.js';
 
 const SETTINGS_KEYS = {
   excludedCategoryKeywords: 'excluded_category_keywords',
@@ -19,55 +37,14 @@ const REQUIRED_COLUMNS = {
   dedupe_source_date: 'TEXT',
   split_parent_id: 'INTEGER',
   is_hidden: 'INTEGER DEFAULT 0',
+  // Nth identical (date, description, amount) row within one statement, so two same-day
+  // $5 coffees are kept as two rows while re-importing the same file still dedupes.
+  dedupe_seq: 'INTEGER DEFAULT 0',
+  import_batch_id: 'TEXT',
+  applied_rule_id: 'INTEGER',
+  merchant: 'TEXT',
+  reimburses_id: 'INTEGER',
 };
-
-const rowify = (execResult) => {
-  if (!execResult || execResult.length === 0) return [];
-  const { columns = [], values = [] } = execResult[0] || {};
-  return values.map((row) => {
-    const mapped = {};
-    columns.forEach((column, index) => {
-      mapped[column] = row[index];
-    });
-    return mapped;
-  });
-};
-
-const scalar = async (db, sql, fallback = 0) => {
-  const rows = rowify(await db.exec(sql));
-  if (!rows.length) return fallback;
-  const value = rows[0][Object.keys(rows[0])[0]];
-  return value ?? fallback;
-};
-
-const sqlValue = (value) => {
-  if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? String(value) : 'NULL';
-  }
-  if (typeof value === 'boolean') {
-    return value ? '1' : '0';
-  }
-  return `'${String(value).replace(/'/g, "''")}'`;
-};
-
-const toNumber = (value, fallback = 0) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
-
-const round2 = (value) => Math.round(toNumber(value) * 100) / 100;
-
-const randomKey = (prefix) => {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-};
-
-const normalizeText = (value) => String(value ?? '').trim();
-
-const normalizeLower = (value) => normalizeText(value).toLowerCase();
 
 const normalizeStringList = (values) => {
   if (!Array.isArray(values)) return [];
@@ -130,26 +107,22 @@ const ensureAppSettingsSchema = async (db) => {
   `);
 
   for (const [key, value] of Object.entries(DEFAULT_ANALYTICS_SETTINGS)) {
-    await db.exec(`
-      INSERT OR IGNORE INTO app_settings (key, value)
-      VALUES (${sqlValue(key)}, ${sqlValue(JSON.stringify(normalizeStringList(value)))});
-    `);
+    await db.exec(
+      'INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);',
+      binds(key, JSON.stringify(normalizeStringList(value))),
+    );
   }
 };
 
 const getAnalyticsSettings = async (db) => {
-  await ensureAppSettingsSchema(db);
+  const cached = settingsCache.get(db);
+  if (cached) return cached;
+
+  await bootstrapSchema(db);
   const defaults = DEFAULT_ANALYTICS_SETTINGS;
 
-  const rows = rowify(await db.exec(`
-    SELECT key, value
-    FROM app_settings
-    WHERE key IN (
-      ${sqlValue(SETTINGS_KEYS.excludedCategoryKeywords)},
-      ${sqlValue(SETTINGS_KEYS.excludedDescriptionKeywords)},
-      ${sqlValue(SETTINGS_KEYS.reimbursementExcludedCategories)}
-    );
-  `));
+  const keys = Object.values(SETTINGS_KEYS);
+  const rows = await queryRows(db, `SELECT key, value FROM app_settings WHERE key IN (${placeholders(keys.length)});`, keys);
 
   const byKey = new Map(rows.map((row) => [String(row.key), row.value]));
 
@@ -172,11 +145,13 @@ const getAnalyticsSettings = async (db) => {
     reimbursementExcludedCategories.unshift('income');
   }
 
-  return {
+  const settings = {
     excludedCategoryKeywords,
     excludedDescriptionKeywords,
     reimbursementExcludedCategories,
   };
+  settingsCache.set(db, settings);
+  return settings;
 };
 
 const getAnalyticsSqlFragments = async (db) => {
@@ -223,6 +198,11 @@ const getAnalyticsSqlFragments = async (db) => {
     reimbursementExcludedCategoriesSql,
   };
 };
+
+// SQL condition that is true for rows counted in spending analytics.
+export async function getAnalyticsInclusionSql(db) {
+  return (await getAnalyticsSqlFragments(db)).includedConditionSql;
+}
 
 const serializeStringListSetting = (values, fallbackValues = []) => {
   const finalValues = Array.isArray(values) ? normalizeStringList(values) : normalizeStringList(fallbackValues);
@@ -442,6 +422,10 @@ const buildSplitChildRow = (parentRow, split, splitParentId = null) => ({
   dedupe_source_date: parentRow.dedupe_source_date || parentRow.date,
   split_parent_id: splitParentId,
   is_hidden: 0,
+  import_batch_id: parentRow.import_batch_id ?? null,
+  applied_rule_id: parentRow.applied_rule_id ?? null,
+  merchant: parentRow.merchant ?? null,
+  dedupe_seq: 0,
 });
 
 const applyRulesToImportedTransaction = (transaction, rules = []) => {
@@ -459,6 +443,7 @@ const applyRulesToImportedTransaction = (transaction, rules = []) => {
         current = {
           ...current,
           category: nextCategory,
+          applied_rule_id: rule.id ?? null,
         };
       }
       continue;
@@ -478,6 +463,7 @@ const applyRulesToImportedTransaction = (transaction, rules = []) => {
         dedupe_source_amount: dedupeSourceAmount,
         dedupe_source_date: dedupeSourceDate,
         split_parent_id: null,
+        applied_rule_id: rule.id ?? null,
       };
 
       return {
@@ -526,21 +512,30 @@ const buildRuleUpdateValues = (rule) => ({
   id: Number(rule.id),
 });
 
-const ensureRulesTableSchema = async (db) => {
-  // Use safe ALTER TABLE ADD COLUMN instead of a table-rebuild so this is
-  // idempotent and can never crash with 'no such table: rules_new'.
-  const columnsToAdd = [
-    { name: 'match_payload', type: 'TEXT' },
-    // Add future V3+ columns here as needed.
-  ];
+const RULE_COLUMNS = {
+  name: 'TEXT',
+  priority: 'INTEGER DEFAULT 0',
+  match_column: 'TEXT',
+  match_operator: 'TEXT',
+  match_value: 'TEXT',
+  match_payload: 'TEXT',
+  action_type: 'TEXT',
+  action_payload: 'TEXT',
+  is_active: 'INTEGER DEFAULT 1',
+};
 
-  for (const col of columnsToAdd) {
-    try {
-      await db.exec(`ALTER TABLE rules ADD COLUMN ${col.name} ${col.type};`);
-    } catch {
-      // Column already exists — safe to ignore.
+const addMissingColumns = async (db, table, required) => {
+  const existing = new Set(rowify(await db.exec(`PRAGMA table_info(${table});`)).map((col) => String(col.name)));
+  for (const [name, type] of Object.entries(required)) {
+    if (!existing.has(name)) {
+      await db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type};`);
     }
   }
+};
+
+// Adds any column an older database is missing, so the UPDATE below never hits "no such column".
+const ensureRulesTableSchema = async (db) => {
+  await addMissingColumns(db, 'rules', RULE_COLUMNS);
 };
 
 const toTransaction = (row) => {
@@ -560,19 +555,78 @@ const toTransaction = (row) => {
     split_parent_id: splitParentId,
     is_split: splitParentId !== null,
     is_excluded: Boolean(Number(row.is_excluded)),
+    tags: row.tags ? String(row.tags).split(',').sort() : [],
   };
 };
 
 export async function ensureDedupeIndex(db) {
   await db.exec(`
     DROP INDEX IF EXISTS ux_transactions_date_desc_amount;
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_dedupe
-    ON transactions (date, description, amount)
+    DROP INDEX IF EXISTS ux_transactions_dedupe;
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_transactions_dedupe_seq
+    ON transactions (date, description, amount, dedupe_seq)
     WHERE split_parent_id IS NULL;
   `);
 }
 
+const ensureSupportTables = async (db) => {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS import_batches (
+      id TEXT PRIMARY KEY,
+      file_name TEXT,
+      profile_name TEXT,
+      imported_at TEXT,
+      inserted_count INTEGER DEFAULT 0,
+      duplicate_count INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS csv_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE,
+      mapping TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS budgets (
+      category TEXT PRIMARY KEY,
+      monthly_amount REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS transaction_tags (
+      transaction_id INTEGER NOT NULL,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (transaction_id, tag)
+    );
+
+    CREATE TABLE IF NOT EXISTS account_balances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account TEXT NOT NULL,
+      date TEXT NOT NULL,
+      balance REAL NOT NULL,
+      UNIQUE (account, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS merchant_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pattern TEXT NOT NULL,
+      merchant TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_transactions_visible_date ON transactions (is_hidden, date);
+    CREATE INDEX IF NOT EXISTS ix_transactions_category ON transactions (category);
+    CREATE INDEX IF NOT EXISTS ix_transactions_split_parent ON transactions (split_parent_id);
+    CREATE INDEX IF NOT EXISTS ix_transactions_import_batch ON transactions (import_batch_id);
+    CREATE INDEX IF NOT EXISTS ix_transaction_tags_tag ON transaction_tags (tag);
+  `);
+};
+
+// Databases whose schema is already bootstrapped. DatabaseContext creates a new api
+// object for every database it loads, so a reload starts unbootstrapped again.
+const bootstrappedDbs = new WeakSet();
+const settingsCache = new WeakMap();
+
 export async function bootstrapSchema(db) {
+  if (bootstrappedDbs.has(db)) return;
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS transactions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -611,14 +665,7 @@ export async function bootstrapSchema(db) {
 
   await ensureAppSettingsSchema(db);
 
-  const tableInfo = rowify(await db.exec('PRAGMA table_info(transactions);'));
-  const columns = new Set(tableInfo.map((col) => String(col.name)));
-
-  for (const [columnName, columnType] of Object.entries(REQUIRED_COLUMNS)) {
-    if (!columns.has(columnName)) {
-      await db.exec(`ALTER TABLE transactions ADD COLUMN ${columnName} ${columnType};`);
-    }
-  }
+  await addMissingColumns(db, 'transactions', REQUIRED_COLUMNS);
 
   // Migration: ensure legacy rows default to visible for the ghost-parent architecture.
   await db.exec(`
@@ -643,7 +690,7 @@ export async function bootstrapSchema(db) {
         SELECT MIN(id)
         FROM transactions
         WHERE split_parent_id IS NULL
-        GROUP BY date, description, amount
+        GROUP BY date, description, amount, COALESCE(dedupe_seq, 0)
       );
   `);
 
@@ -703,12 +750,7 @@ export async function bootstrapSchema(db) {
       }
     }
 
-    await db.exec(`
-      UPDATE rules
-      SET match_payload = ${sqlValue(matchPayload)},
-          action_payload = ${sqlValue(actionPayload)}
-      WHERE id = ${sqlValue(row.id)};
-    `);
+    await db.exec('UPDATE rules SET match_payload = ?, action_payload = ? WHERE id = ?;', binds(matchPayload, actionPayload, row.id));
   }
 
   // ── V2 → V2.5 Data Migration ─────────────────────────────────────────────────
@@ -725,93 +767,115 @@ export async function bootstrapSchema(db) {
       // Only needs migration if it's a bare array (V2), not already an object (V2.5)
       if (Array.isArray(parsed)) {
         const wrapped = JSON.stringify({ match_type: 'all', conditions: parsed });
-        await db.exec(`
-          UPDATE rules
-          SET match_payload = ${sqlValue(wrapped)}
-          WHERE id = ${sqlValue(row.id)};
-        `);
+        await db.exec('UPDATE rules SET match_payload = ? WHERE id = ?;', binds(wrapped, row.id));
       }
     } catch {
       // Unparseable payload — leave it alone; the engine falls back gracefully.
     }
   }
+
+  await ensureSupportTables(db);
+  // Rows from before merchant names existed get one computed once.
+  await refreshMerchants(db, { onlyMissing: true });
+  bootstrappedDbs.add(db);
 }
 
-export async function getTransactions(db, { startDate, endDate, categories = [] } = {}) {
+export async function getTransactions(db, {
+  startDate,
+  endDate,
+  categories = [],
+  importBatchId,
+  tag,
+  ids,
+} = {}) {
   if (!db) return [];
   const { excludedPatternSql } = await getAnalyticsSqlFragments(db);
 
-  const conditions = ['is_hidden = 0'];
-  if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
-  if (endDate) conditions.push(`date <= ${sqlValue(endDate)}`);
-
+  const conditions = ['t.is_hidden = 0'];
+  const params = [];
+  if (startDate) { conditions.push('t.date >= ?'); params.push(startDate); }
+  if (endDate) { conditions.push('t.date <= ?'); params.push(endDate); }
   if (Array.isArray(categories) && categories.length > 0) {
-    const categoryList = categories.map((category) => sqlValue(category)).join(', ');
-    conditions.push(`category IN (${categoryList})`);
+    conditions.push(`t.category IN (${placeholders(categories.length)})`);
+    params.push(...categories);
+  }
+  if (importBatchId) { conditions.push('t.import_batch_id = ?'); params.push(importBatchId); }
+  if (tag) { conditions.push('t.id IN (SELECT transaction_id FROM transaction_tags WHERE tag = ?)'); params.push(tag); }
+  if (Array.isArray(ids)) {
+    if (ids.length === 0) return [];
+    conditions.push(`t.id IN (${placeholders(ids.length)})`);
+    params.push(...ids);
   }
 
-  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const rows = rowify(await db.exec(`
+  const rows = await queryRows(db, `
     SELECT
-      id,
-      date,
-      description,
-      amount,
-      account,
-      category,
-      source_file,
-      manual_override,
-      split_parent_id,
+      t.id, t.date, t.description, t.amount, t.account, t.category, t.source_file,
+      t.manual_override, t.split_parent_id, t.merchant, t.import_batch_id, t.reimburses_id,
+      t.applied_rule_id, r.name AS applied_rule_name,
+      tg.tags,
       CASE
-        WHEN manual_override = 1 THEN 1
-        WHEN manual_override = 0 THEN 0
+        WHEN t.manual_override = 1 THEN 1
+        WHEN t.manual_override = 0 THEN 0
         WHEN ${excludedPatternSql} THEN 1
         ELSE 0
       END AS is_excluded
-    FROM transactions
-    ${whereClause}
-    ORDER BY date DESC;
-  `));
+    FROM transactions t
+    LEFT JOIN rules r ON r.id = t.applied_rule_id
+    LEFT JOIN (
+      SELECT transaction_id, GROUP_CONCAT(tag, ',') AS tags FROM transaction_tags GROUP BY transaction_id
+    ) tg ON tg.transaction_id = t.id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY t.date DESC, t.id DESC;
+  `, binds(...params));
 
   return rows.map(toTransaction);
 }
 
+// Lowest dedupe_seq not already used by an identical (date, description, amount) row,
+// so a deliberate duplicate entered by hand never trips the unique index.
+const nextDedupeSeq = async (db, date, description, amount, excludeId = null) => Number(await scalar(
+  db,
+  `SELECT COALESCE(MAX(dedupe_seq) + 1, 0) FROM transactions
+   WHERE split_parent_id IS NULL AND date = ? AND description = ? AND amount = ? AND id IS NOT ?;`,
+  0,
+  binds(date, description, amount, excludeId),
+));
+
 export async function createTransaction(db, tx) {
   await bootstrapSchema(db);
 
-  const dedupeGroupKey = randomKey('manual');
+  const amount = toNumber(tx.amount);
+  const dedupeSeq = await nextDedupeSeq(db, tx.date, tx.description, amount);
 
-  await db.exec(`
-    INSERT INTO transactions (
+  await db.exec(
+    `INSERT INTO transactions (
       date, description, amount, account, category, source_file, manual_override,
-      dedupe_group_key, dedupe_source_amount, dedupe_source_date
-    ) VALUES (
-      ${sqlValue(tx.date)},
-      ${sqlValue(tx.description)},
-      ${sqlValue(toNumber(tx.amount))},
-      ${sqlValue(tx.account)},
-      ${sqlValue(tx.category)},
-      ${sqlValue(tx.source_file || 'Manual Entry')},
-      ${sqlValue(tx.manual_override ?? null)},
-      ${sqlValue(dedupeGroupKey)},
-      ${sqlValue(toNumber(tx.amount))},
-      ${sqlValue(tx.date)}
-    );
-  `);
+      dedupe_group_key, dedupe_source_amount, dedupe_source_date, dedupe_seq, merchant
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+    binds(
+      tx.date,
+      tx.description,
+      amount,
+      tx.account,
+      tx.category,
+      tx.source_file || 'Manual Entry',
+      tx.manual_override ?? null,
+      randomKey('manual'),
+      amount,
+      tx.date,
+      dedupeSeq,
+      resolveMerchant(tx.description, await getMerchantRules(db)),
+    ),
+  );
 
-  const id = Number(await scalar(db, 'SELECT last_insert_rowid() AS id;', 0));
+  const id = await lastInsertId(db);
   await saveDbToBrowser(db);
   return { status: 'success', id };
 }
 
 // Split halves must stay in step with their hidden original; undo the split to change them.
 const assertNotSplitChild = async (db, transactionId) => {
-  const parentId = await scalar(
-    db,
-    `SELECT split_parent_id FROM transactions WHERE id = ${sqlValue(transactionId)};`,
-    null,
-  );
+  const parentId = await scalar(db, 'SELECT split_parent_id FROM transactions WHERE id = ?;', null, binds(transactionId));
   if (parentId !== null) {
     throw new Error('This transaction is part of a split. Undo the split before editing or deleting it.');
   }
@@ -820,18 +884,26 @@ const assertNotSplitChild = async (db, transactionId) => {
 export async function updateTransaction(db, transactionId, tx) {
   await assertNotSplitChild(db, transactionId);
 
-  await db.exec(`
-    UPDATE transactions
-    SET
-      date = ${sqlValue(tx.date)},
-      description = ${sqlValue(tx.description)},
-      amount = ${sqlValue(toNumber(tx.amount))},
-      account = ${sqlValue(tx.account)},
-      category = ${sqlValue(tx.category)},
-      source_file = ${sqlValue(tx.source_file)},
-      manual_override = ${sqlValue(tx.manual_override ?? null)}
-    WHERE id = ${sqlValue(transactionId)};
-  `);
+  const amount = toNumber(tx.amount);
+  const dedupeSeq = await nextDedupeSeq(db, tx.date, tx.description, amount, transactionId);
+
+  await db.exec(
+    `UPDATE transactions
+     SET date = ?, description = ?, amount = ?, account = ?, category = ?, source_file = ?,
+         manual_override = ?, dedupe_seq = ?
+     WHERE id = ?;`,
+    binds(
+      tx.date,
+      tx.description,
+      amount,
+      tx.account,
+      tx.category,
+      tx.source_file,
+      tx.manual_override ?? null,
+      dedupeSeq,
+      transactionId,
+    ),
+  );
 
   await saveDbToBrowser(db);
   return { status: 'success', id: Number(transactionId) };
@@ -840,23 +912,21 @@ export async function updateTransaction(db, transactionId, tx) {
 export async function deleteTransaction(db, transactionId) {
   await assertNotSplitChild(db, transactionId);
 
-  await db.exec(`DELETE FROM transactions WHERE id = ${sqlValue(transactionId)};`);
-  const affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
-
-  if (affectedRows === 0) {
-    throw new Error('Transaction not found');
-  }
+  await inTransaction(db, async () => {
+    await db.exec('DELETE FROM transactions WHERE id = ?;', binds(transactionId));
+    if (await changes(db) === 0) {
+      throw new Error('Transaction not found');
+    }
+    await db.exec('DELETE FROM transaction_tags WHERE transaction_id = ?;', binds(transactionId));
+    await db.exec('UPDATE transactions SET reimburses_id = NULL WHERE reimburses_id = ?;', binds(transactionId));
+  });
 
   await saveDbToBrowser(db);
   return { status: 'success', id: Number(transactionId) };
 }
 
 export async function overrideTransaction(db, transactionId, overrideStatus) {
-  await db.exec(`
-    UPDATE transactions
-    SET manual_override = ${sqlValue(overrideStatus)}
-    WHERE id = ${sqlValue(transactionId)};
-  `);
+  await db.exec('UPDATE transactions SET manual_override = ? WHERE id = ?;', binds(overrideStatus, transactionId));
 
   await saveDbToBrowser(db);
   return { status: 'success', override_status: overrideStatus };
@@ -865,24 +935,13 @@ export async function overrideTransaction(db, transactionId, overrideStatus) {
 export async function getRules(db, { activeOnly = false } = {}) {
   if (!db) return [];
 
-  const whereClause = activeOnly ? 'WHERE is_active = 1' : '';
-
-  const rows = rowify(await db.exec(`
-    SELECT
-      id,
-      name,
-      priority,
-      match_column,
-      match_operator,
-      match_value,
-      match_payload,
-      action_type,
-      action_payload,
-      is_active
+  const rows = await queryRows(db, `
+    SELECT id, name, priority, match_column, match_operator, match_value, match_payload,
+           action_type, action_payload, is_active
     FROM rules
-    ${whereClause}
+    ${activeOnly ? 'WHERE is_active = 1' : ''}
     ORDER BY priority ASC, id ASC;
-  `));
+  `);
 
   return rows.map(toRule);
 }
@@ -948,15 +1007,15 @@ export async function updateAnalyticsSettingsConfig(db, updates = {}) {
     ];
 
     for (const record of records) {
-      await db.exec(`
-        INSERT INTO app_settings (key, value)
-        VALUES (${sqlValue(record.key)}, ${sqlValue(record.value)})
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-      `);
+      await db.exec(
+        'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;',
+        binds(record.key, record.value),
+      );
     }
 
     await db.exec('COMMIT;');
     transactionCommitted = true;
+    settingsCache.delete(db);
     await saveDbToBrowser(db);
   } catch (error) {
     if (!transactionCommitted) {
@@ -968,34 +1027,17 @@ export async function updateAnalyticsSettingsConfig(db, updates = {}) {
   return getAnalyticsSettingsConfig(db);
 }
 
+const RULE_VALUE_COLUMNS = ['name', 'priority', 'match_column', 'match_operator', 'match_value', 'match_payload', 'action_type', 'action_payload', 'is_active'];
+
 export async function createRule(db, rule) {
   const values = buildRuleInsertValues(rule);
 
-  await db.exec(`
-    INSERT INTO rules (
-      name,
-      priority,
-      match_column,
-      match_operator,
-      match_value,
-      match_payload,
-      action_type,
-      action_payload,
-      is_active
-    ) VALUES (
-      ${sqlValue(values.name)},
-      ${sqlValue(values.priority)},
-      ${sqlValue(values.match_column)},
-      ${sqlValue(values.match_operator)},
-      ${sqlValue(values.match_value)},
-      ${sqlValue(values.match_payload)},
-      ${sqlValue(values.action_type)},
-      ${sqlValue(values.action_payload)},
-      ${sqlValue(values.is_active)}
-    );
-  `);
+  await db.exec(
+    `INSERT INTO rules (${RULE_VALUE_COLUMNS.join(', ')}) VALUES (${placeholders(RULE_VALUE_COLUMNS.length)});`,
+    binds(...RULE_VALUE_COLUMNS.map((column) => values[column])),
+  );
 
-  const id = Number(await scalar(db, 'SELECT last_insert_rowid() AS id;', 0));
+  const id = await lastInsertId(db);
   await saveDbToBrowser(db);
   return { status: 'success', id };
 }
@@ -1003,39 +1045,89 @@ export async function createRule(db, rule) {
 export async function updateRule(db, ruleId, rule) {
   const values = buildRuleUpdateValues({ ...rule, id: ruleId });
 
-  await db.exec(`
-    UPDATE rules
-    SET
-      name = ${sqlValue(values.name)},
-      priority = ${sqlValue(values.priority)},
-      match_column = ${sqlValue(values.match_column)},
-      match_operator = ${sqlValue(values.match_operator)},
-      match_value = ${sqlValue(values.match_value)},
-      match_payload = ${sqlValue(values.match_payload)},
-      action_type = ${sqlValue(values.action_type)},
-      action_payload = ${sqlValue(values.action_payload)},
-      is_active = ${sqlValue(values.is_active)}
-    WHERE id = ${sqlValue(values.id)};
-  `);
+  await db.exec(
+    `UPDATE rules SET ${RULE_VALUE_COLUMNS.map((column) => `${column} = ?`).join(', ')} WHERE id = ?;`,
+    binds(...RULE_VALUE_COLUMNS.map((column) => values[column]), values.id),
+  );
 
   await saveDbToBrowser(db);
   return { status: 'success', id: Number(ruleId) };
 }
 
 export async function deleteRule(db, ruleId) {
-  await db.exec(`DELETE FROM rules WHERE id = ${sqlValue(ruleId)};`);
-  const affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
-
-  if (affectedRows === 0) {
+  await db.exec('DELETE FROM rules WHERE id = ?;', binds(ruleId));
+  if (await changes(db) === 0) {
     throw new Error('Rule not found');
   }
 
+  await db.exec('UPDATE transactions SET applied_rule_id = NULL WHERE applied_rule_id = ?;', binds(ruleId));
   await saveDbToBrowser(db);
   return { status: 'success', id: Number(ruleId) };
 }
 
 export function applyRulesToImportedTransactions(rows, rules = []) {
   return rows.map((row) => applyRulesToImportedTransaction(row, rules));
+}
+
+// Inserts one split half that belongs to `parent` (already hidden).
+const insertSplitChild = async (db, parent, line, dedupe, appliedRuleId = null) => {
+  await db.exec(
+    `INSERT INTO transactions (
+      date, description, amount, account, category, source_file, manual_override,
+      dedupe_group_key, dedupe_source_amount, dedupe_source_date, split_parent_id, is_hidden,
+      merchant, applied_rule_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?);`,
+    binds(
+      parent.date,
+      line.description || parent.description,
+      line.amount,
+      parent.account,
+      line.category,
+      parent.source_file,
+      parent.manual_override,
+      dedupe.groupKey,
+      dedupe.sourceAmount,
+      dedupe.sourceDate,
+      parent.id,
+      parent.merchant ?? null,
+      appliedRuleId,
+    ),
+  );
+  return lastInsertId(db);
+};
+
+const dedupeInfoFor = (row) => ({
+  groupKey: row.dedupe_group_key || randomKey('split'),
+  sourceAmount: row.dedupe_source_amount ?? row.amount,
+  sourceDate: row.dedupe_source_date || row.date,
+});
+
+// Rows a rule would change right now; shared by the sweep and the preview.
+const findRuleMatches = async (db, rule) => {
+  const rows = await queryRows(db, 'SELECT * FROM transactions WHERE is_hidden = 0 ORDER BY id ASC;');
+  const matched = rows.filter((row) => ruleMatchesTransaction(row, rule));
+  if (normalizeRuleActionType(rule.action_type) !== 'split') {
+    return matched.map((row) => ({ row }));
+  }
+  return matched
+    .filter((row) => row.split_parent_id === null || row.split_parent_id === undefined)
+    .map((row) => ({ row, splits: parseSplitDefinitions(rule.action_payload, row.amount) }))
+    .filter((match) => match.splits);
+};
+
+// Lists the rows a (possibly unsaved) rule would change, without changing anything.
+export async function previewRule(db, rule) {
+  await bootstrapSchema(db);
+  const normalizedRule = toRule({ ...rule, is_active: 1 });
+  const matches = await findRuleMatches(db, normalizedRule);
+  const actionType = normalizeRuleActionType(normalizedRule.action_type);
+  const target = normalizeText(normalizedRule.action_payload);
+  return matches.map(({ row, splits }) => ({
+    ...toTransaction(row),
+    change: actionType === 'split'
+      ? splits.map((line) => `${line.category} ${line.amount.toFixed(2)}`).join(' + ')
+      : row.category === target ? 'already in category' : `${row.category} → ${target}`,
+  }));
 }
 
 export async function executeRuleOnDatabase(db, rule) {
@@ -1047,38 +1139,16 @@ export async function executeRuleOnDatabase(db, rule) {
     ...rule,
     is_active: rule?.is_active ? 1 : 0,
   });
+  const ruleId = Number.isFinite(normalizedRule.id) ? normalizedRule.id : null;
 
-  const rows = rowify(await db.exec(`
-    SELECT
-      id,
-      date,
-      description,
-      amount,
-      account,
-      category,
-      source_file,
-      manual_override,
-      dedupe_group_key,
-      dedupe_source_amount,
-      dedupe_source_date,
-      split_parent_id,
-      is_hidden
-    FROM transactions
-    WHERE is_hidden = 0
-    ORDER BY id ASC;
-  `));
-
-  const matchedRows = rows.filter((row) => ruleMatchesTransaction(row, normalizedRule));
-  if (matchedRows.length === 0) {
+  const matches = await findRuleMatches(db, normalizedRule);
+  if (matches.length === 0) {
     return 0;
   }
 
   const actionType = normalizeRuleActionType(normalizedRule.action_type);
-  await db.exec('BEGIN TRANSACTION;');
-  let transactionCommitted = false;
-
-  try {
-    let affectedRows = 0;
+  const affectedRows = await inTransaction(db, async () => {
+    let affected = 0;
 
     if (actionType === 'categorize') {
       const targetCategory = normalizeText(normalizedRule.action_payload);
@@ -1086,87 +1156,40 @@ export async function executeRuleOnDatabase(db, rule) {
         throw new Error('Categorize rules require a target category.');
       }
 
-      const matchedIds = matchedRows.map((row) => Number(row.id)).join(', ');
-      await db.exec(`
-        UPDATE transactions
-        SET category = ${sqlValue(targetCategory)}
-        WHERE id IN (${matchedIds});
-      `);
-
-      affectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
+      const ids = matches.map(({ row }) => Number(row.id));
+      await db.exec(
+        `UPDATE transactions SET category = ?, applied_rule_id = ? WHERE id IN (${placeholders(ids.length)});`,
+        binds(targetCategory, ruleId, ...ids),
+      );
+      affected = await changes(db);
     } else if (actionType === 'split') {
-      for (const parentRow of matchedRows) {
-        if (parentRow.split_parent_id !== null && parentRow.split_parent_id !== undefined) continue;
-        const splits = parseSplitDefinitions(normalizedRule.action_payload, parentRow.amount);
-        if (!splits) continue;
-        const dedupeGroupKey = parentRow.dedupe_group_key || randomKey('split');
-        const dedupeSourceAmount = parentRow.dedupe_source_amount ?? parentRow.amount;
-        const dedupeSourceDate = parentRow.dedupe_source_date || parentRow.date;
-
-        await db.exec(`
-          UPDATE transactions
-          SET is_hidden = 1,
-              dedupe_group_key = ${sqlValue(dedupeGroupKey)},
-              dedupe_source_amount = ${sqlValue(dedupeSourceAmount)},
-              dedupe_source_date = ${sqlValue(dedupeSourceDate)}
-          WHERE id = ${sqlValue(parentRow.id)};
-        `);
-
-        const parentAffectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
-        if (parentAffectedRows === 0) {
+      for (const { row: parentRow, splits } of matches) {
+        const dedupe = dedupeInfoFor(parentRow);
+        await db.exec(
+          `UPDATE transactions
+           SET is_hidden = 1, dedupe_group_key = ?, dedupe_source_amount = ?, dedupe_source_date = ?, applied_rule_id = ?
+           WHERE id = ?;`,
+          binds(dedupe.groupKey, dedupe.sourceAmount, dedupe.sourceDate, ruleId, parentRow.id),
+        );
+        if (await changes(db) === 0) {
           throw new Error('Original transaction was not found.');
         }
-
-        affectedRows += parentAffectedRows;
+        affected += 1;
 
         for (const split of splits) {
-          await db.exec(`
-            INSERT INTO transactions (
-              date,
-              description,
-              amount,
-              account,
-              category,
-              source_file,
-              manual_override,
-              dedupe_group_key,
-              dedupe_source_amount,
-              dedupe_source_date,
-              split_parent_id,
-              is_hidden
-            ) VALUES (
-              ${sqlValue(parentRow.date)},
-              ${sqlValue(split.description || parentRow.description)},
-              ${sqlValue(split.amount)},
-              ${sqlValue(parentRow.account)},
-              ${sqlValue(split.category)},
-              ${sqlValue(parentRow.source_file)},
-              ${sqlValue(parentRow.manual_override)},
-              ${sqlValue(dedupeGroupKey)},
-              ${sqlValue(dedupeSourceAmount)},
-              ${sqlValue(dedupeSourceDate)},
-              ${sqlValue(parentRow.id)},
-              0
-            );
-          `);
-
-          affectedRows += Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
+          await insertSplitChild(db, parentRow, split, dedupe, ruleId);
+          affected += 1;
         }
       }
     } else {
       throw new Error(`Unsupported rule action type: ${normalizedRule.action_type}`);
     }
 
-    await db.exec('COMMIT;');
-    transactionCommitted = true;
-    await saveDbToBrowser(db);
-    return affectedRows;
-  } catch (error) {
-    if (!transactionCommitted) {
-      await db.exec('ROLLBACK;');
-    }
-    throw error;
-  }
+    return affected;
+  });
+
+  await saveDbToBrowser(db);
+  return affectedRows;
 }
 
 export async function splitTransaction(db, transactionId, payload) {
@@ -1179,8 +1202,7 @@ export async function splitTransaction(db, transactionId, payload) {
     throw new Error('Split amounts must be non-zero.');
   }
 
-  const originalRows = rowify(await db.exec(`SELECT * FROM transactions WHERE id = ${sqlValue(transactionId)} LIMIT 1;`));
-  const original = originalRows[0];
+  const [original] = await queryRows(db, 'SELECT * FROM transactions WHERE id = ? LIMIT 1;', binds(transactionId));
   if (!original) {
     throw new Error('Transaction not found');
   }
@@ -1191,135 +1213,77 @@ export async function splitTransaction(db, transactionId, payload) {
     throw new Error(`Split amounts must sum to ${originalAmount.toFixed(2)}. Received ${splitTotal.toFixed(2)}.`);
   }
 
-  const dedupeGroupKey = original.dedupe_group_key || randomKey('split');
-  const dedupeSourceAmount = original.dedupe_source_amount ?? original.amount;
-  const dedupeSourceDate = original.dedupe_source_date || original.date;
-
-  await db.exec('BEGIN TRANSACTION;');
-  let transactionCommitted = false;
-  try {
-    const createdIds = [];
-
-    for (const line of splits) {
-      const description = String(line.description || original.description || '').trim();
-      const category = String(line.category || '').trim();
-      if (!description || !category) {
-        throw new Error('Each split line must include a description and category.');
-      }
-
-      await db.exec(`
-        INSERT INTO transactions (
-          date, description, amount, account, category, source_file, manual_override,
-          dedupe_group_key, dedupe_source_amount, dedupe_source_date, split_parent_id
-        ) VALUES (
-          ${sqlValue(original.date)},
-          ${sqlValue(description)},
-          ${sqlValue(toNumber(line.amount))},
-          ${sqlValue(original.account)},
-          ${sqlValue(category)},
-          ${sqlValue(original.source_file)},
-          ${sqlValue(original.manual_override)},
-          ${sqlValue(dedupeGroupKey)},
-          ${sqlValue(dedupeSourceAmount)},
-          ${sqlValue(dedupeSourceDate)},
-          ${sqlValue(transactionId)}
-        );
-      `);
-
-      const newId = Number(await scalar(db, 'SELECT last_insert_rowid() AS id;', 0));
-      createdIds.push(newId);
-    }
-
-    await db.exec(`
-      UPDATE transactions
-      SET is_hidden = 1
-      WHERE id = ${sqlValue(transactionId)};
-    `);
-
-    await db.exec('COMMIT;');
-  transactionCommitted = true;
-    await saveDbToBrowser(db);
-
-    return {
-      status: 'success',
-      original_id: Number(transactionId),
-      created_ids: createdIds,
-      deleted_original: false,
-      hidden_original: true,
-    };
-  } catch (error) {
-    if (!transactionCommitted) {
-      await db.exec('ROLLBACK;');
-    }
-    throw error;
+  const lines = splits.map((line) => ({
+    description: normalizeText(line.description || original.description),
+    category: normalizeText(line.category),
+    amount: toNumber(line.amount),
+  }));
+  if (lines.some((line) => !line.description || !line.category)) {
+    throw new Error('Each split line must include a description and category.');
   }
+
+  const dedupe = dedupeInfoFor(original);
+  const createdIds = await inTransaction(db, async () => {
+    const ids = [];
+    for (const line of lines) {
+      ids.push(await insertSplitChild(db, original, line, dedupe));
+    }
+    await db.exec('UPDATE transactions SET is_hidden = 1 WHERE id = ?;', binds(transactionId));
+    return ids;
+  });
+
+  await saveDbToBrowser(db);
+  return {
+    status: 'success',
+    original_id: Number(transactionId),
+    created_ids: createdIds,
+    deleted_original: false,
+    hidden_original: true,
+  };
 }
 
 export async function undoSplitTransaction(db, transactionId) {
-  const targetRows = rowify(await db.exec(`
-    SELECT id, split_parent_id
-    FROM transactions
-    WHERE id = ${sqlValue(transactionId)}
-    LIMIT 1;
-  `));
-
-  const target = targetRows[0];
+  const [target] = await queryRows(db, 'SELECT id, split_parent_id FROM transactions WHERE id = ? LIMIT 1;', binds(transactionId));
   if (!target) {
     throw new Error('Transaction not found');
   }
 
-  const requestedId = Number(transactionId);
-  const inferredParentId = target.split_parent_id === null || target.split_parent_id === undefined
-    ? null
+  const parentId = target.split_parent_id === null || target.split_parent_id === undefined
+    ? Number(transactionId)
     : Number(target.split_parent_id);
 
-  const parentId = inferredParentId ?? requestedId;
-
-  const splitCount = Number(await scalar(
-    db,
-    `SELECT COUNT(*) AS row_count FROM transactions WHERE split_parent_id = ${sqlValue(parentId)};`,
-    0,
-  ));
-
+  const splitCount = Number(await scalar(db, 'SELECT COUNT(*) FROM transactions WHERE split_parent_id = ?;', 0, binds(parentId)));
   if (splitCount === 0) {
     throw new Error('Selected transaction is not part of a split group.');
   }
 
-  await db.exec('BEGIN TRANSACTION;');
-  let transactionCommitted = false;
-  try {
-    await db.exec(`
-      DELETE FROM transactions
-      WHERE split_parent_id = ${sqlValue(parentId)};
-    `);
-
-    await db.exec(`
-      UPDATE transactions
-      SET is_hidden = 0
-      WHERE id = ${sqlValue(parentId)};
-    `);
-
-    const parentAffectedRows = Number(await scalar(db, 'SELECT changes() AS changes_count;', 0));
-    if (parentAffectedRows === 0) {
+  await inTransaction(db, async () => {
+    await db.exec(
+      'DELETE FROM transaction_tags WHERE transaction_id IN (SELECT id FROM transactions WHERE split_parent_id = ?);',
+      binds(parentId),
+    );
+    await db.exec('DELETE FROM transactions WHERE split_parent_id = ?;', binds(parentId));
+    await db.exec('UPDATE transactions SET is_hidden = 0 WHERE id = ?;', binds(parentId));
+    if (await changes(db) === 0) {
       throw new Error('Original split parent transaction was not found.');
     }
+  });
 
-    await db.exec('COMMIT;');
-    transactionCommitted = true;
-    await saveDbToBrowser(db);
-
-    return {
-      status: 'success',
-      parent_id: parentId,
-      deleted_split_rows: splitCount,
-    };
-  } catch (error) {
-    if (!transactionCommitted) {
-      await db.exec('ROLLBACK;');
-    }
-    throw error;
-  }
+  await saveDbToBrowser(db);
+  return {
+    status: 'success',
+    parent_id: parentId,
+    deleted_split_rows: splitCount,
+  };
 }
+
+const dateRange = (startDate, endDate) => {
+  const parts = [];
+  const params = [];
+  if (startDate) { parts.push('date >= ?'); params.push(startDate); }
+  if (endDate) { parts.push('date <= ?'); params.push(endDate); }
+  return { clause: parts.length ? ` AND ${parts.join(' AND ')}` : '', params };
+};
 
 export async function getKpis(db, month) {
   const {
@@ -1327,16 +1291,16 @@ export async function getKpis(db, month) {
     reimbursementExcludedCategoriesSql,
   } = await getAnalyticsSqlFragments(db);
 
-  const rows = rowify(await db.exec(`
+  const rows = await queryRows(db, `
     SELECT
       COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
       COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) NOT IN ${reimbursementExcludedCategoriesSql} AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_reimbursements,
       COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(amount), 0) AS net_flow
     FROM transactions
-    WHERE strftime('%Y-%m', date) = ${sqlValue(month)}
+    WHERE strftime('%Y-%m', date) = ?
       AND is_hidden = 0;
-  `));
+  `, binds(month));
 
   const row = rows[0] || {};
   const grossExpenses = round2(row.gross_expenses || 0);
@@ -1358,24 +1322,31 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
     reimbursementExcludedCategoriesSql,
   } = await getAnalyticsSqlFragments(db);
 
-  const dateConditions = [];
-  if (startDate) dateConditions.push(`date >= ${sqlValue(startDate)}`);
-  if (endDate) dateConditions.push(`date <= ${sqlValue(endDate)}`);
+  const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
 
-  const dateClause = dateConditions.length ? ` AND ${dateConditions.join(' AND ')}` : '';
-
-  const categoryRows = rowify(await db.exec(`
-    SELECT category, SUM(amount) AS total
-    FROM transactions
-    WHERE amount < 0
-      AND is_hidden = 0
-      AND ${includedConditionSql}
-      ${dateClause}
+  // Reimbursements linked to an expense count against that expense's category.
+  const linkedDateClause = dateClause.replace(/\bdate\b/g, 'r.date');
+  const categoryRows = await queryRows(db, `
+    SELECT category, SUM(amount) AS total FROM (
+      SELECT category, amount
+      FROM transactions
+      WHERE amount < 0
+        AND is_hidden = 0
+        AND ${includedConditionSql}
+        ${dateClause}
+      UNION ALL
+      SELECT e.category, r.amount
+      FROM transactions r
+      JOIN transactions e ON e.id = r.reimburses_id
+      WHERE r.amount > 0 AND r.is_hidden = 0
+        ${linkedDateClause}
+    )
     GROUP BY category
+    HAVING SUM(amount) < 0
     ORDER BY total ASC;
-  `));
+  `, [...dateParams, ...dateParams]);
 
-  const totalRows = rowify(await db.exec(`
+  const totalRows = await queryRows(db, `
     SELECT
       COALESCE(ABS(SUM(CASE WHEN amount < 0 AND ${includedConditionSql} THEN amount ELSE 0 END)), 0) AS gross_expenses,
       COALESCE(SUM(CASE WHEN amount > 0
@@ -1386,7 +1357,7 @@ export async function getSpendingByCategory(db, { startDate, endDate } = {}) {
     WHERE 1=1
       AND is_hidden = 0
       ${dateClause};
-  `));
+  `, dateParams);
 
   const totals = totalRows[0] || {};
   const grossExpenses = round2(totals.gross_expenses || 0);
@@ -1408,13 +1379,10 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
     reimbursementExcludedCategoriesSql,
   } = await getAnalyticsSqlFragments(db);
 
-  const conditions = ['is_hidden = 0'];
-  if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
-  if (endDate) conditions.push(`date <= ${sqlValue(endDate)}`);
+  const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
+  const whereClause = `WHERE is_hidden = 0 ${dateClause}`;
 
-  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const rows = rowify(await db.exec(`
+  const rows = await queryRows(db, `
     SELECT
       strftime('%Y-%m', date) AS month,
       COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
@@ -1425,7 +1393,7 @@ export async function getSpendingTrend(db, { startDate, endDate } = {}) {
     ${whereClause}
     GROUP BY month
     ORDER BY month ASC;
-  `));
+  `, dateParams);
 
   return rows
     .filter((row) => row.month)
@@ -1449,13 +1417,10 @@ export async function getDailySpending(db, { startDate, endDate } = {}) {
     reimbursementExcludedCategoriesSql,
   } = await getAnalyticsSqlFragments(db);
 
-  const conditions = ['is_hidden = 0'];
-  if (startDate) conditions.push(`date >= ${sqlValue(startDate)}`);
-  if (endDate) conditions.push(`date <= ${sqlValue(endDate)}`);
+  const { clause: dateClause, params: dateParams } = dateRange(startDate, endDate);
+  const whereClause = `WHERE is_hidden = 0 ${dateClause}`;
 
-  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-  const rows = rowify(await db.exec(`
+  const rows = await queryRows(db, `
     SELECT
       date AS day,
       COALESCE(SUM(CASE WHEN amount > 0 AND LOWER(category) = 'income' AND ${includedConditionSql} THEN amount ELSE 0 END), 0) AS total_income,
@@ -1465,7 +1430,7 @@ export async function getDailySpending(db, { startDate, endDate } = {}) {
     ${whereClause}
     GROUP BY day
     ORDER BY day ASC;
-  `));
+  `, dateParams);
 
   return rows
     .filter((row) => row.day)

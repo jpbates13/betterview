@@ -13,8 +13,8 @@ import {
 const DatabaseContext = createContext(null);
 
 const createDbApi = (callWorker) => ({
-  exec: async (sql) => {
-    const response = await callWorker('exec', { sql });
+  exec: async (sql, params) => {
+    const response = await callWorker('exec', params ? { sql, params } : { sql });
     return response.results || [];
   },
   export: async () => {
@@ -124,6 +124,8 @@ export function DatabaseProvider({ children }) {
     }
 
     await callWorker('load', { buffer: loadedData.buffer }, [loadedData.buffer]);
+    // A fresh api object per loaded database, so per-database caches start clean.
+    setDb(createDbApi(callWorker));
     setDbName('Browser-saved database');
     setDataVersion((prev) => prev + 1);
     return true;
