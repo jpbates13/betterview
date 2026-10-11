@@ -88,7 +88,7 @@ npm install
 npm run dev
 ```
 
-Then open `http://localhost:9445`.
+Then open `http://127.0.0.1:9445`.
 
 ## CSV Import Behavior
 The importer (`src/csvImporter.js`) recognizes Fidelity transaction and history exports. Any other bank's CSV opens a column-mapping step: pick the date, description, amount (or separate debit and credit) and account columns, the date order (month first, day first or year first) and the sign convention, then optionally save it as a named format. Saved formats are matched automatically on later imports.
@@ -102,8 +102,8 @@ The importer (`src/csvImporter.js`) recognizes Fidelity transaction and history 
 `npm run dev` listens on localhost only. To use the app from other devices, serve a production build and let Tailscale proxy to it rather than exposing the dev server:
 
 ```bash
-npm run serve:tailnet          # vite build, then vite preview on localhost:9445
-tailscale serve --bg --https=8443 http://localhost:9445
+npm run serve:tailnet          # vite build, then vite preview on 127.0.0.1:9445
+tailscale serve --bg --https=8443 http://127.0.0.1:9445
 ```
 
 Add the resulting `https://<machine>.<tailnet>.ts.net:8443` URL to the OAuth client's authorized JavaScript origins in Google Cloud Console. Vite already allows `*.ts.net` hosts; set `VITE_ALLOWED_HOST` for any other hostname.
