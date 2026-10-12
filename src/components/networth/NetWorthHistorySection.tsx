@@ -40,6 +40,33 @@ const dateLabel = (iso: string) => {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 };
+const DAY_MS = 86_400_000;
+const toTime = (iso: string) => Date.parse(`${iso}T00:00:00Z`);
+const isoOf = (time: number) => new Date(time).toISOString().slice(0, 10);
+
+/** Ticks on month or year boundaries, so the axis reads as a calendar. */
+function timeTicks(start: number, end: number): { ticks: number[]; format: (time: number) => string } {
+  const spanDays = (end - start) / DAY_MS;
+  const first = new Date(start);
+  if (spanDays > 3 * 366) {
+    const ticks: number[] = [];
+    for (let y = first.getUTCFullYear() + (first.getUTCMonth() > 0 || first.getUTCDate() > 1 ? 1 : 0); Date.UTC(y, 0, 1) <= end; y += 1) {
+      ticks.push(Date.UTC(y, 0, 1));
+    }
+    return { ticks, format: (t) => String(new Date(t).getUTCFullYear()) };
+  }
+  const step = [1, 2, 3, 6].find((months) => spanDays / 30.4 / months <= 7) ?? 12;
+  const ticks: number[] = [];
+  const y = first.getUTCFullYear();
+  let m = first.getUTCMonth() + (first.getUTCDate() > 1 ? 1 : 0);
+  m = Math.ceil(m / step) * step;
+  for (let t = Date.UTC(y, m, 1); t <= end; m += step, t = Date.UTC(y, m, 1)) ticks.push(t);
+  return {
+    ticks,
+    format: (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', year: '2-digit', timeZone: 'UTC' }),
+  };
+}
+
 const shortDateLabel = (iso: string) => {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', year: '2-digit', day: 'numeric' });
@@ -173,6 +200,12 @@ export default function NetWorthHistorySection() {
     const startIso = start.toISOString().slice(0, 10);
     return history.filter((p) => p.date >= startIso);
   }, [history, latest, rangeDays]);
+  // Points sit at their real dates, so a stretch with few figures still spans its time.
+  const timeData = useMemo(() => chartData.map((p) => ({ ...p, time: toTime(p.date) })), [chartData]);
+  const axis = useMemo(
+    () => (timeData.length > 1 ? timeTicks(timeData[0].time, timeData[timeData.length - 1].time) : null),
+    [timeData],
+  );
   const newestFirst = [...history].reverse();
   const visible = showAll ? newestFirst : newestFirst.slice(0, 10);
   const latestSnapshot = [...history].reverse().find((p) => p.source === 'fidelity');
@@ -375,16 +408,19 @@ export default function NetWorthHistorySection() {
                 <div className="h-56 sm:h-72 -ml-2 mb-4">
                   {chartData.length > 1 ? (
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                      <LineChart data={timeData} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
                         <XAxis
-                          dataKey="date"
-                          tickFormatter={shortDateLabel}
+                          dataKey="time"
+                          type="number"
+                          scale="time"
+                          domain={['dataMin', 'dataMax']}
+                          ticks={axis?.ticks}
+                          tickFormatter={(t) => axis?.format(Number(t)) ?? shortDateLabel(isoOf(Number(t)))}
                           tick={{ fontSize: 11, fill: '#6B7280' }}
                           tickLine={false}
                           axisLine={false}
-                          interval="preserveStartEnd"
-                          minTickGap={24}
+                          minTickGap={16}
                         />
                         <YAxis
                           tickFormatter={(v) => moneyWhole(v)}
@@ -398,7 +434,7 @@ export default function NetWorthHistorySection() {
                           formatter={(value) => [money(Number(value)), 'Net worth']}
                           labelFormatter={(label, payload) => {
                             const point = payload?.[0]?.payload as NetWorthHistoryPoint | undefined;
-                            return `${dateLabel(String(label))}${point?.source === 'fidelity' ? ' · Fidelity snapshot' : ''}`;
+                            return `${dateLabel(point?.date ?? isoOf(Number(label)))}${point?.source === 'fidelity' ? ' · Fidelity snapshot' : ''}`;
                           }}
                         />
                         <Line
