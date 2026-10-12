@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { Landmark, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { deleteAccountBalance, getAccountBalances, getNetWorthSeries, setAccountBalance } from '../../db/features.js';
-import { Empty, ErrorNote, Kpi, Loading, Section } from './ui';
+import { Empty, ErrorNote, Kpi, Loading, Section } from '../planning/ui';
 import {
   dangerIconButtonClass,
   errorMessage,
@@ -17,14 +17,14 @@ import {
   todayIso,
   useDbData,
   useMutation,
-} from './shared';
+} from '../planning/shared';
 import type { AccountBalance, DbApi, NetWorthPoint } from '../../types';
 
 type Data = { snapshots: AccountBalance[]; series: NetWorthPoint[]; accounts: string[] };
 
 const NET_WORTH_COLOR = '#2563EB';
 
-export default function NetWorthSection() {
+export default function AccountBalancesSection() {
   const today = todayIso();
   const load = useCallback(async (db: DbApi): Promise<Data> => {
     const [snapshots, series, accountRows] = await Promise.all([
@@ -102,8 +102,8 @@ export default function NetWorthSection() {
   return (
     <Section
       icon={Landmark}
-      title="Net worth"
-      description="Enter account balances now and then; months in between are carried forward with that account's transactions. Enter debts as negative balances."
+      title="Account balances"
+      description="For accounts you track here rather than in Fidelity: enter a balance now and then and months in between are carried forward with that account's transactions. Enter debts as negative balances."
       action={!isFormOpen && (
         <button type="button" className={primaryButtonClass} onClick={() => openForm()}>
           <Plus className="h-4 w-4" aria-hidden="true" /> Add balance
@@ -164,12 +164,12 @@ export default function NetWorthSection() {
       {isLoading && data.snapshots.length === 0 ? (
         <Loading />
       ) : data.snapshots.length === 0 ? (
-        <Empty>No balances yet. Add each account's balance on a recent date to start tracking net worth.</Empty>
+        <Empty>No balances yet. Add an account's balance on a recent date to track it month by month.</Empty>
       ) : (
         <>
           {latest && (
             <div className="grid grid-cols-2 gap-3 mb-4">
-              <Kpi label="Net worth" value={moneyWhole(latest.netWorth)} hint={`as of ${latest.date}`} />
+              <Kpi label="Tracked total" value={moneyWhole(latest.netWorth)} hint={`as of ${latest.date}`} />
               <Kpi
                 label={data.series.length > 12 ? 'Change over 12 months' : 'Change since start'}
                 value={change === null ? '—' : `${change >= 0 ? '+' : '−'}${moneyWhole(Math.abs(change))}`}

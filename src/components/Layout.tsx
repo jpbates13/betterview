@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  AlertTriangle, CalendarRange, Cloud, CloudOff, Database, Home, Loader2, LogOut, PieChart,
+  AlertTriangle, CalendarRange, Cloud, CloudOff, Database, Home, Landmark, Loader2, LogOut, PieChart,
   RefreshCw, SlidersHorizontal, UploadCloud,
 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
@@ -15,6 +15,7 @@ const navItems = [
   { name: 'Rules', short: 'Rules', path: '/rules', icon: SlidersHorizontal },
   { name: 'Analytics', short: 'Analytics', path: '/analytics', icon: PieChart },
   { name: 'Planning', short: 'Planning', path: '/planning', icon: CalendarRange },
+  { name: 'Net worth', short: 'Net worth', path: '/net-worth', icon: Landmark },
   { name: 'Data & backups', short: 'Data', path: '/data', icon: Database },
 ];
 
@@ -176,7 +177,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
 
         {/* Bottom tabs (phones) */}
-        <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 bg-white border-t border-gray-200 grid grid-cols-5 pb-[env(safe-area-inset-bottom)]">
+        <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 bg-white border-t border-gray-200 grid grid-cols-6 pb-[env(safe-area-inset-bottom)]">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = location.pathname === item.path;
