@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { makeDb } from './testDb.js';
 import * as q from '../src/dbQueries.js';
-import { parseFidelityNetWorth, parseNetWorthHistory } from '../src/db/netWorthParser.js';
+import { parseFidelityNetWorth, parseHistoryJson, parseNetWorthHistory } from '../src/db/netWorthParser.js';
 import {
   deleteNetWorthPoint, getNetWorthHistory, importNetWorthPoints, pointBefore, saveNetWorthSnapshot, setNetWorthPoint,
 } from '../src/db/netWorth.js';
@@ -86,6 +86,64 @@ describe('pasted net worth history', () => {
       { date: '2026-10-12', netWorth: 397784.74 },
     ]);
     expect(skipped).toEqual(['not a row 123']);
+  });
+
+  it('reads month-only dates as month ends and abbreviated amounts', () => {
+    const { points, skipped } = parseNetWorthHistory([
+      'Jan 2023 $250K',
+      "February '23\t$1.25M",
+      '03/2023 251,000',
+      '2023-04: $252,500.50',
+      'Dec 12, 2023 $260,000',
+    ].join('\n'));
+    expect(points).toEqual([
+      { date: '2023-01-31', netWorth: 250000 },
+      { date: '2023-02-28', netWorth: 1250000 },
+      { date: '2023-03-31', netWorth: 251000 },
+      { date: '2023-04-30', netWorth: 252500.5 },
+      { date: '2023-12-12', netWorth: 260000 },
+    ]);
+    expect(skipped).toEqual([]);
+  });
+
+  it('keeps only the hovered chart point from a copied Credit Karma page', () => {
+    const page = readFileSync(new URL('./fixtures/credit-karma-home.txt', import.meta.url), 'utf8');
+    expect(parseNetWorthHistory(page)).toEqual({ points: [{ date: '2025-06-30', netWorth: 210450 }], skipped: [] });
+  });
+
+  it('finds the longest dated series in pasted chart JSON', () => {
+    const response = JSON.stringify({
+      data: {
+        netWorth: {
+          current: { amount: 350000 },
+          accounts: [{ name: 'Checking', balance: 500 }],
+          transactions: [1, 2, 3, 4, 5].map((d) => ({ date: `2024-05-0${d}`, amount: -10 })),
+          history: [
+            { date: '2024-01-31T00:00:00Z', netWorth: { amount: 200000 }, assets: { amount: 400000 } },
+            { date: '2024-02-29T00:00:00Z', netWorth: { amount: 205000.5 }, assets: { amount: 405000 } },
+            { date: '2024-03-31T00:00:00Z', netWorth: { amount: 199000 }, assets: { amount: 401000 } },
+          ],
+        },
+      },
+    });
+    expect(parseNetWorthHistory(response).points).toEqual([
+      { date: '2024-01-31', netWorth: 200000 },
+      { date: '2024-02-29', netWorth: 205000.5 },
+      { date: '2024-03-31', netWorth: 199000 },
+    ]);
+  });
+
+  it('reads timestamp/value pairs and plain value fields', () => {
+    expect(parseHistoryJson(JSON.stringify([[Date.UTC(2024, 0, 31), 100], [Date.UTC(2024, 1, 29), 110]])).points).toEqual([
+      { date: '2024-01-31', netWorth: 100 },
+      { date: '2024-02-29', netWorth: 110 },
+    ]);
+    expect(parseHistoryJson(JSON.stringify({ points: [{ x: 1706659200, y: '250,000' }, { x: 1709164800, y: '251,000' }] })).points).toEqual([
+      { date: '2024-01-31', netWorth: 250000 },
+      { date: '2024-02-29', netWorth: 251000 },
+    ]);
+    expect(parseHistoryJson('{"no": "series"}')).toBeNull();
+    expect(parseHistoryJson('not json')).toBeNull();
   });
 
   it('pairs a date with the figure on the next line', () => {

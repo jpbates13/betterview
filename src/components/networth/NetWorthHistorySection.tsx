@@ -274,7 +274,7 @@ export default function NetWorthHistorySection() {
               {closeButton}
             </div>
             <p className="text-xs text-gray-500">
-              One date and total per line, such as <code>10/12/2026 $397,784.74</code> or <code>2026-10-12, 397784.74</code>.
+              One date and total per line, such as <code>10/12/2026 $397,784.74</code>, <code>2026-10-12, 397784.74</code> or <code>Jan 2023 $250K</code> (a month alone counts as its last day). You can also paste a chart's data as JSON, copied from the response in your browser's Network tab.
               Fidelity's chart "View as a table" copies in this shape too. Dates that already have a pasted Fidelity snapshot keep it.
             </p>
             <ErrorNote message={error} />
