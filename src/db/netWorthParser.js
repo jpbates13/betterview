@@ -152,28 +152,59 @@ const DATE_PATTERNS = [
   /\b\d{1,2}[\s-]+[A-Za-z]{3,9}\.?,?[\s-]+\d{4}\b/,
 ];
 
+const MONTH_NAMES = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// Month-only dates, as monthly charts label them ("Jan 2023", "January '23", "01/2023",
+// "2023-01"). They count as the last day of that month.
+const MONTH_PATTERNS = [
+  { pattern: /\b([A-Za-z]{3,9})\.?,?\s+'?(\d{4}|\d{2})\b/, month: (m) => MONTH_NAMES.indexOf(m[1].slice(0, 3).toLowerCase()) + 1, year: (m) => m[2] },
+  { pattern: /\b(\d{1,2})\/(\d{4})\b/, month: (m) => Number(m[1]), year: (m) => m[2] },
+  { pattern: /\b(\d{4})-(\d{1,2})\b/, month: (m) => Number(m[2]), year: (m) => m[1] },
+];
+
+const monthEnd = (year, month) => {
+  const y = Number(String(year).length === 2 ? `20${year}` : year);
+  if (!(month >= 1 && month <= 12) || y < 1900) return null;
+  return new Date(Date.UTC(y, month, 0)).toISOString().slice(0, 10);
+};
+
 const findDate = (line) => {
+  const without = (match) => line.slice(0, match.index) + ' ' + line.slice(match.index + match[0].length);
   for (const pattern of DATE_PATTERNS) {
     const match = line.match(pattern);
     if (!match) continue;
     const iso = parseDateToIso(match[0]);
-    if (iso) return { iso, rest: line.slice(0, match.index) + ' ' + line.slice(match.index + match[0].length) };
+    if (iso) return { iso, rest: without(match) };
+  }
+  for (const { pattern, month, year } of MONTH_PATTERNS) {
+    const match = line.match(pattern);
+    if (!match) continue;
+    const iso = monthEnd(year(match), month(match));
+    if (iso) return { iso, rest: without(match) };
   }
   return null;
 };
 
+// "$250K" and "$1.2M", as chart labels abbreviate.
+const scaledValue = (raw) => {
+  const suffix = raw.match(/([kKmM])$/);
+  const value = moneyValue(suffix ? raw.slice(0, -1) : raw);
+  if (value === null || !suffix) return value;
+  return value * (suffix[1].toLowerCase() === 'k' ? 1e3 : 1e6);
+};
+
 const findValue = (text) => {
-  const match = text.match(/\(?[-−]?\s?\$?\s?\d[\d,]*(?:\.\d+)?\)?/g);
+  const match = text.match(/\(?[-−]?\s?\$?\s?\d[\d,]*(?:\.\d+)?\)?(?:\s?[kKmM]\b)?/g);
   if (!match) return null;
   // The largest-looking figure on the line is the balance, not a stray day or percent.
-  const values = match.map((m) => moneyValue(m)).filter((v) => v !== null && Number.isFinite(v));
+  const values = match.map((m) => scaledValue(m.replace(/\s/g, ''))).filter((v) => v !== null && Number.isFinite(v));
   if (values.length === 0) return null;
   return values.reduce((best, v) => (Math.abs(v) > Math.abs(best) ? v : best));
 };
 
 /**
  * Reads pasted history: one date and one figure per line ("10/12/2026 $397,784.74",
- * "2026-10-12,397784.74", "Oct 12, 2026\t$397,784.74"), or a date line followed by its
+ * "2026-10-12,397784.74", "Oct 12, 2026\t$397,784.74", "Jan 2023 $250K"), or a date line followed by its
  * figure on the next line, as a copied table often comes out.
  */
 export function parseNetWorthHistory(text) {

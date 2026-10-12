@@ -88,6 +88,24 @@ describe('pasted net worth history', () => {
     expect(skipped).toEqual(['not a row 123']);
   });
 
+  it('reads month-only dates as month ends and abbreviated amounts', () => {
+    const { points, skipped } = parseNetWorthHistory([
+      'Jan 2023 $250K',
+      "February '23\t$1.25M",
+      '03/2023 251,000',
+      '2023-04: $252,500.50',
+      'Dec 12, 2023 $260,000',
+    ].join('\n'));
+    expect(points).toEqual([
+      { date: '2023-01-31', netWorth: 250000 },
+      { date: '2023-02-28', netWorth: 1250000 },
+      { date: '2023-03-31', netWorth: 251000 },
+      { date: '2023-04-30', netWorth: 252500.5 },
+      { date: '2023-12-12', netWorth: 260000 },
+    ]);
+    expect(skipped).toEqual([]);
+  });
+
   it('pairs a date with the figure on the next line', () => {
     const { points } = parseNetWorthHistory('Jul 14, 2026\n$372,982.55\nJul 15, 2026\n$373,100.00');
     expect(points).toEqual([
