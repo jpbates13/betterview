@@ -208,7 +208,17 @@ const findValue = (text) => {
  * figure on the next line, as a copied table often comes out.
  */
 export function parseNetWorthHistory(text) {
-  const lines = cleanLines(text).filter(Boolean);
+  const fromJson = parseHistoryJson(text);
+  if (fromJson) return fromJson;
+
+  let lines = cleanLines(text).filter(Boolean);
+  // A copied Credit Karma page carries just the chart point under the pointer (between the
+  // totals and the range buttons); everything after it is spending and transactions.
+  const isCreditKarma = /Credit Karma/i.test(text) && lines.includes('30D');
+  if (isCreditKarma) {
+    const start = lines.findIndex((line) => /^Net worth$/i.test(line));
+    lines = lines.slice(start + 1, lines.indexOf('30D'));
+  }
   const byDate = new Map();
   const skipped = [];
   let pendingDate = null;
@@ -239,5 +249,101 @@ export function parseNetWorthHistory(text) {
   const points = [...byDate.entries()]
     .map(([date, netWorth]) => ({ date, netWorth }))
     .sort((a, b) => a.date.localeCompare(b.date));
-  return { points, skipped };
+  // The page's totals and axis labels aren't rows anyone meant to import.
+  return { points, skipped: isCreditKarma ? [] : skipped };
+}
+
+// ── JSON, as a site's own chart data comes back in the browser's Network tab ──
+
+const VALUE_KEY = /net.?worth|value|amount|balance|total|y$/i;
+
+// Seconds or milliseconds since 1970 between 1990 and 2100, or a date string.
+const toIsoDate = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1e11 ? value : value > 6e8 && value < 4.2e9 ? value * 1000 : NaN;
+    if (!Number.isFinite(ms)) return null;
+    const date = new Date(ms);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+  }
+  if (typeof value !== 'string') return null;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return value.slice(0, 10);
+  if (/^\d{10,13}$/.test(value)) return toIsoDate(Number(value));
+  return parseDateToIso(value) ?? findDate(value)?.iso ?? null;
+};
+
+const toAmount = (value) => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' && /^[-−]?\$?[\d,]+(\.\d+)?$/.test(value.trim())) return moneyValue(value);
+  return null;
+};
+
+// { date, netWorth: { amount: 1 } } → { date, 'netWorth.amount': 1 }
+const flatten = (row, prefix = '', depth = 0, out = {}) => {
+  for (const [key, value] of Object.entries(row)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === 'object' && !Array.isArray(value) && depth < 2) flatten(value, path, depth + 1, out);
+    else out[path] = value;
+  }
+  return out;
+};
+
+const pointsFromArray = (array) => {
+  // [[timestamp, value], ...]
+  if (array.every((item) => Array.isArray(item) && item.length >= 2)) {
+    const points = array.map(([d, v]) => ({ date: toIsoDate(d), netWorth: toAmount(v) }));
+    return points.every((p) => p.date && p.netWorth !== null) ? points : [];
+  }
+  if (!array.every((item) => item && typeof item === 'object' && !Array.isArray(item))) return [];
+  const rows = array.map((item) => flatten(item));
+  const keys = Object.keys(rows[0]);
+  const dateKey = keys.find((key) => rows.every((row) => toIsoDate(row[key])));
+  if (!dateKey) return [];
+  const numericKeys = keys.filter((key) => key !== dateKey && rows.every((row) => toAmount(row[key]) !== null));
+  if (numericKeys.length === 0) return [];
+  const valueKey = numericKeys.find((key) => /net.?worth/i.test(key))
+    ?? numericKeys.find((key) => VALUE_KEY.test(key.split('.').pop()))
+    ?? numericKeys[0];
+  const points = rows.map((row) => ({ date: toIsoDate(row[dateKey]), netWorth: toAmount(row[valueKey]) }));
+  points.isNetWorth = /net.?worth/i.test(valueKey);
+  return points;
+};
+
+/**
+ * Finds the longest series of dated figures anywhere in pasted JSON. Returns null when the
+ * text isn't JSON or holds no such series.
+ */
+export function parseHistoryJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!/^[[{]/.test(trimmed)) return null;
+  let data;
+  try {
+    data = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  // A series named for net worth beats a longer one that isn't (such as transactions).
+  let best = [];
+  const beats = (points) => (Boolean(points.isNetWorth) !== Boolean(best.isNetWorth)
+    ? Boolean(points.isNetWorth)
+    : points.length > best.length);
+  const visit = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 12) return;
+    if (Array.isArray(node)) {
+      if (node.length > 0) {
+        const points = pointsFromArray(node);
+        if (points.length > 0 && beats(points)) best = points;
+      }
+      node.forEach((child) => visit(child, depth + 1));
+    } else {
+      Object.values(node).forEach((child) => visit(child, depth + 1));
+    }
+  };
+  visit(data, 0);
+  if (best.length === 0) return null;
+  // One figure per day; the last one listed for a day wins.
+  const byDate = new Map(best.map((p) => [p.date, round2(p.netWorth)]));
+  const points = [...byDate.entries()]
+    .map(([date, netWorth]) => ({ date, netWorth }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  return { points, skipped: [] };
 }
