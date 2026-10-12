@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Analytics from './pages/Analytics';
 import RulesDashboard from './pages/RulesDashboard.jsx';
 import Planning from './pages/Planning';
+import NetWorth from './pages/NetWorth';
 import DataSettings from './pages/DataSettings';
 import { useDriveSync } from './useDriveSync';
 import { useDatabase } from './useDatabase';
@@ -209,6 +210,7 @@ function DashboardApp() {
           <Route path="/rules" element={<RulesDashboard />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/planning" element={<Planning />} />
+          <Route path="/net-worth" element={<NetWorth />} />
           <Route path="/data" element={<DataSettings />} />
         </Routes>
       </Layout>

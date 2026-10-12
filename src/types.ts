@@ -334,6 +334,47 @@ export interface NetWorthPoint {
   byAccount: Record<string, number>;
 }
 
+export interface NetWorthCategory {
+  group: 'asset' | 'liability';
+  name: string;
+  total: number;
+}
+
+export interface NetWorthAccount {
+  group: 'asset' | 'liability';
+  category: string;
+  name: string;
+  /** null when Fidelity can't show the balance ("Access balance info"). */
+  balance: number | null;
+  type: string;
+  /** Last digits of the account number, when Fidelity shows them. */
+  mask: string;
+  /** How fresh Fidelity says the balance is: "Just now", "2 days ago", "09/12/2025". */
+  updated: string;
+  institution: string;
+}
+
+export interface ParsedNetWorth {
+  date: string;
+  netWorth: number;
+  assets: number;
+  liabilities: number;
+  categories: NetWorthCategory[];
+  accounts: NetWorthAccount[];
+  warnings: string[];
+}
+
+export interface NetWorthHistoryPoint {
+  id: number;
+  date: string;
+  netWorth: number;
+  assets: number | null;
+  liabilities: number | null;
+  source: 'fidelity' | 'manual';
+  categories: NetWorthCategory[];
+  accounts: NetWorthAccount[];
+}
+
 export interface TagSummary {
   tag: string;
   count: number;

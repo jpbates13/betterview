@@ -625,6 +625,16 @@ const ensureSupportTables = async (db) => {
       UNIQUE (account, date)
     );
 
+    CREATE TABLE IF NOT EXISTS net_worth_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      net_worth REAL NOT NULL,
+      assets REAL,
+      liabilities REAL,
+      source TEXT NOT NULL,
+      details TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS merchant_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pattern TEXT NOT NULL,
