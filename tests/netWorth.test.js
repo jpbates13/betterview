@@ -4,7 +4,8 @@ import { makeDb } from './testDb.js';
 import * as q from '../src/dbQueries.js';
 import { parseFidelityNetWorth, parseHistoryJson, parseNetWorthHistory } from '../src/db/netWorthParser.js';
 import {
-  deleteNetWorthPoint, getNetWorthHistory, importNetWorthPoints, pointBefore, saveNetWorthSnapshot, setNetWorthPoint,
+  addOutsideAccounts, balanceOn, deleteNetWorthPoint, getNetWorthHistory, getOutsideAccounts, importAccountBalances,
+  importNetWorthPoints, pointBefore, saveNetWorthSnapshot, setAccountAddsToNetWorth, setNetWorthPoint,
 } from '../src/db/netWorth.js';
 
 // An anonymized copy of the Net worth page as copied from Fidelity Full View.
@@ -146,6 +147,17 @@ describe('pasted net worth history', () => {
     expect(parseHistoryJson('not json')).toBeNull();
   });
 
+  it('reads year-end balances from a statement with a column per year', () => {
+    const statement = readFileSync(new URL('./fixtures/cash-balance-statement.txt', import.meta.url), 'utf8');
+    expect(parseNetWorthHistory(statement).points).toEqual([
+      { date: '2022-12-31', netWorth: 1000 },
+      { date: '2023-12-31', netWorth: 4000 },
+      { date: '2024-12-31', netWorth: 8000 },
+      { date: '2025-12-31', netWorth: 12000 },
+      { date: '2026-09-30', netWorth: 12500 },
+    ]);
+  });
+
   it('pairs a date with the figure on the next line', () => {
     const { points } = parseNetWorthHistory('Jul 14, 2026\n$372,982.55\nJul 15, 2026\n$373,100.00');
     expect(points).toEqual([
@@ -206,5 +218,48 @@ describe('net worth history storage', () => {
     expect(pointBefore(history, 90).date).toBe('2026-07-01');
     expect(pointBefore(history, 365).date).toBe('2025-10-01');
     expect(pointBefore(history.slice(2), 90)).toBeNull();
+  });
+});
+
+describe('accounts outside Fidelity', () => {
+  const balances = [{ date: '2026-01-01', balance: 100 }, { date: '2026-01-11', balance: 200 }];
+
+  it('draws a straight line between balances, holds the last, and adds nothing before the first', () => {
+    expect(balanceOn(balances, '2025-12-31')).toBeNull();
+    expect(balanceOn(balances, '2026-01-01')).toBe(100);
+    expect(balanceOn(balances, '2026-01-06')).toBe(150);
+    expect(balanceOn(balances, '2026-03-01')).toBe(200);
+  });
+
+  it('adds included accounts to every recorded total', () => {
+    const history = [
+      { id: 1, date: '2025-12-01', netWorth: 1000 },
+      { id: 2, date: '2026-01-06', netWorth: 2000 },
+    ];
+    const accounts = [
+      { account: 'HSA', include: true, balances },
+      { account: 'Checking', include: false, balances: [{ date: '2020-01-01', balance: 999 }] },
+    ];
+    const combined = addOutsideAccounts(history, accounts);
+    expect(combined.map((p) => [p.date, p.recorded, p.outside, p.netWorth])).toEqual([
+      ['2025-12-01', 1000, 0, 1000],
+      ['2026-01-06', 2000, 150, 2150],
+    ]);
+    expect(combined[1].outsideByAccount).toEqual({ HSA: 150 });
+  });
+
+  it('imports an account history and remembers whether it counts', async () => {
+    const db = await freshDb();
+    expect(await importAccountBalances(db, 'Pension', [{ date: '2024-12-31', netWorth: 8000 }, { date: '2025-12-31', netWorth: 12000 }])).toBe(2);
+    await importAccountBalances(db, 'Pension', [{ date: '2025-12-31', netWorth: 12001 }]);
+    let [pension] = await getOutsideAccounts(db);
+    expect(pension).toEqual({
+      account: 'Pension',
+      include: true,
+      balances: [{ date: '2024-12-31', balance: 8000 }, { date: '2025-12-31', balance: 12001 }],
+    });
+    await setAccountAddsToNetWorth(db, 'Pension', false);
+    [pension] = await getOutsideAccounts(db);
+    expect(pension.include).toBe(false);
   });
 });

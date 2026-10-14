@@ -375,6 +375,20 @@ export interface NetWorthHistoryPoint {
   accounts: NetWorthAccount[];
 }
 
+export interface OutsideAccount {
+  account: string;
+  /** Whether its balance is added to net worth figures. */
+  include: boolean;
+  balances: { date: string; balance: number }[];
+}
+
+export interface NetWorthWithOutside extends NetWorthHistoryPoint {
+  /** The total as recorded (pasted or entered), before outside accounts. */
+  recorded: number;
+  outside: number;
+  outsideByAccount: Record<string, number>;
+}
+
 export interface TagSummary {
   tag: string;
   count: number;

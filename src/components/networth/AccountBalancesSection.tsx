@@ -1,65 +1,73 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Landmark, Pencil, Plus, Trash2, X } from 'lucide-react';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { deleteAccountBalance, getAccountBalances, getNetWorthSeries, setAccountBalance } from '../../db/features.js';
-import { Empty, ErrorNote, Kpi, Loading, Section } from '../planning/ui';
+import { Landmark, ListPlus, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { deleteAccountBalance, getAccountBalances, setAccountBalance } from '../../db/features.js';
+import { getOutsideAccounts, importAccountBalances, setAccountAddsToNetWorth } from '../../db/netWorth.js';
+import { parseNetWorthHistory } from '../../db/netWorthParser.js';
+import { Empty, ErrorNote, Loading, Section, SuccessNote } from '../planning/ui';
 import {
   dangerIconButtonClass,
   errorMessage,
   iconButtonClass,
   inputClass,
   money,
-  moneyWhole,
-  monthLabel,
   primaryButtonClass,
   secondaryButtonClass,
   todayIso,
   useDbData,
   useMutation,
 } from '../planning/shared';
-import type { AccountBalance, DbApi, NetWorthPoint } from '../../types';
+import type { AccountBalance, DbApi, OutsideAccount } from '../../types';
 
-type Data = { snapshots: AccountBalance[]; series: NetWorthPoint[]; accounts: string[] };
+type Data = { snapshots: AccountBalance[]; outside: OutsideAccount[]; accounts: string[] };
+type Panel = 'balance' | 'history' | null;
 
-const NET_WORTH_COLOR = '#2563EB';
+const dateLabel = (iso: string) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+};
 
 export default function AccountBalancesSection() {
   const today = todayIso();
   const load = useCallback(async (db: DbApi): Promise<Data> => {
-    const [snapshots, series, accountRows] = await Promise.all([
+    const [snapshots, outside, accountRows] = await Promise.all([
       getAccountBalances(db),
-      getNetWorthSeries(db, { months: 24, today }),
+      getOutsideAccounts(db),
       db.exec("SELECT DISTINCT account FROM transactions WHERE account IS NOT NULL AND TRIM(account) <> '' ORDER BY account;"),
     ]);
     const fromTransactions = (accountRows[0]?.values ?? []).map((row) => String(row[0]));
     const typed = snapshots.map((s) => ({ ...s, id: Number(s.id), balance: Number(s.balance) }));
     const accounts = [...new Set([...typed.map((s) => s.account), ...fromTransactions])].sort((a, b) => a.localeCompare(b));
-    return { snapshots: typed, series, accounts };
-  }, [today]);
-  const { data, isLoading, error: loadError } = useDbData(load, { snapshots: [], series: [], accounts: [] } as Data);
+    return { snapshots: typed, outside, accounts };
+  }, []);
+  const { data, isLoading, error: loadError } = useDbData(load, { snapshots: [], outside: [], accounts: [] } as Data);
   const mutate = useMutation();
 
-  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [panel, setPanel] = useState<Panel>(null);
   const [editing, setEditing] = useState<AccountBalance | null>(null);
   const [account, setAccount] = useState('');
   const [date, setDate] = useState(today);
   const [balance, setBalance] = useState('');
+  const [historyText, setHistoryText] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const parsedHistory = useMemo(() => parseNetWorthHistory(historyText), [historyText]);
 
-  const openForm = (snapshot?: AccountBalance) => {
+  const openPanel = (next: Panel, snapshot?: AccountBalance, forAccount?: string) => {
+    setPanel(next);
     setEditing(snapshot ?? null);
-    setAccount(snapshot?.account ?? '');
+    setAccount(snapshot?.account ?? forAccount ?? '');
     setDate(snapshot?.date ?? today);
     setBalance(snapshot ? String(snapshot.balance) : '');
+    setHistoryText('');
     setError('');
-    setIsFormOpen(true);
+    setNotice('');
   };
 
-  const closeForm = () => {
-    setIsFormOpen(false);
+  const closePanel = () => {
+    setPanel(null);
     setEditing(null);
     setError('');
   };
@@ -76,9 +84,24 @@ export default function AccountBalancesSection() {
           await deleteAccountBalance(db, editing.id);
         }
       });
-      closeForm();
+      closePanel();
     } catch (err) {
       setError(errorMessage(err, 'Could not save the balance.'));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleImport = async (event: FormEvent) => {
+    event.preventDefault();
+    setIsSaving(true);
+    setError('');
+    try {
+      const saved = await mutate((db) => importAccountBalances(db, account, parsedHistory.points));
+      closePanel();
+      setNotice(`Saved ${saved} balance${saved === 1 ? '' : 's'} for ${account.trim()}.`);
+    } catch (err) {
+      setError(errorMessage(err, 'Could not save the balances.'));
     } finally {
       setIsSaving(false);
     }
@@ -93,49 +116,65 @@ export default function AccountBalancesSection() {
     }
   };
 
-  const latest = data.series[data.series.length - 1];
-  const yearAgo = data.series.length > 12 ? data.series[data.series.length - 13] : data.series[0];
-  const change = latest && yearAgo && latest !== yearAgo ? latest.netWorth - yearAgo.netWorth : null;
-  const chartData = data.series.map((p) => ({ ...p, label: monthLabel(p.date.slice(0, 7)) }));
+  const toggleInclude = async (item: OutsideAccount) => {
+    try {
+      await mutate((db) => setAccountAddsToNetWorth(db, item.account, !item.include));
+    } catch (err) {
+      setError(errorMessage(err, 'Could not change the account.'));
+    }
+  };
+
   const visibleSnapshots = showAll ? data.snapshots : data.snapshots.slice(0, 8);
+  const accountInput = (
+    <label className="text-sm text-gray-700 space-y-1 min-w-0">
+      <span className="block font-medium">Account</span>
+      <input
+        list="networth-accounts"
+        value={account}
+        onChange={(e) => setAccount(e.target.value)}
+        className={inputClass}
+        placeholder="HSA"
+        required
+      />
+      <datalist id="networth-accounts">
+        {data.accounts.map((name) => <option key={name} value={name} />)}
+      </datalist>
+    </label>
+  );
+  const panelHeader = (title: string) => (
+    <div className="flex items-center justify-between">
+      <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+      <button type="button" className={iconButtonClass} onClick={closePanel} aria-label="Cancel">
+        <X className="h-4 w-4" />
+      </button>
+    </div>
+  );
 
   return (
     <Section
       icon={Landmark}
-      title="Account balances"
-      description="For accounts you track here rather than in Fidelity: enter a balance now and then and months in between are carried forward with that account's transactions. Enter debts as negative balances."
-      action={!isFormOpen && (
-        <button type="button" className={primaryButtonClass} onClick={() => openForm()}>
-          <Plus className="h-4 w-4" aria-hidden="true" /> Add balance
-        </button>
+      title="Accounts outside Fidelity"
+      description="For accounts Fidelity Full View doesn't include. Their balances are added to every net worth figure above, drawn as a straight line between the dates you enter and held at the latest one after that. Enter debts as negative balances."
+      action={!panel && (
+        <>
+          <button type="button" className={primaryButtonClass} onClick={() => openPanel('history')}>
+            <ListPlus className="h-4 w-4" aria-hidden="true" /> Paste history
+          </button>
+          <button type="button" className={secondaryButtonClass} onClick={() => openPanel('balance')}>
+            <Plus className="h-4 w-4" aria-hidden="true" /> Add balance
+          </button>
+        </>
       )}
     >
-      <ErrorNote message={loadError || (!isFormOpen ? error : '')} />
+      <ErrorNote message={loadError || (!panel ? error : '')} />
+      {!panel && <SuccessNote message={notice} />}
 
-      {isFormOpen && (
+      {panel === 'balance' && (
         <form onSubmit={handleSubmit} className="mb-4 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-900">{editing ? 'Edit balance' : 'New balance'}</h3>
-            <button type="button" className={iconButtonClass} onClick={closeForm} aria-label="Cancel">
-              <X className="h-4 w-4" />
-            </button>
-          </div>
+          {panelHeader(editing ? 'Edit balance' : 'New balance')}
           <ErrorNote message={error} />
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <label className="text-sm text-gray-700 space-y-1 min-w-0">
-              <span className="block font-medium">Account</span>
-              <input
-                list="networth-accounts"
-                value={account}
-                onChange={(e) => setAccount(e.target.value)}
-                className={inputClass}
-                placeholder="Checking"
-                required
-              />
-              <datalist id="networth-accounts">
-                {data.accounts.map((name) => <option key={name} value={name} />)}
-              </datalist>
-            </label>
+            {accountInput}
             <label className="text-sm text-gray-700 space-y-1 min-w-0">
               <span className="block font-medium">Date</span>
               <input type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} className={inputClass} required />
@@ -155,8 +194,47 @@ export default function AccountBalancesSection() {
             </label>
           </div>
           <div className="flex gap-2 justify-end">
-            <button type="button" className={secondaryButtonClass} onClick={closeForm}>Cancel</button>
+            <button type="button" className={secondaryButtonClass} onClick={closePanel}>Cancel</button>
             <button type="submit" className={primaryButtonClass} disabled={isSaving}>{isSaving ? 'Saving…' : 'Save balance'}</button>
+          </div>
+        </form>
+      )}
+
+      {panel === 'history' && (
+        <form onSubmit={handleImport} className="mb-4 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:p-4 space-y-3">
+          {panelHeader('Paste an account history')}
+          <p className="text-xs text-gray-500">
+            One date and balance per line, such as <code>12/31/2024 $13,717.09</code>, or a whole statement with a column per year
+            and an "Ending Balance" row. Balances already saved on the same dates are replaced.
+          </p>
+          <ErrorNote message={error} />
+          <div className="max-w-sm">{accountInput}</div>
+          <textarea
+            className={`${inputClass} font-mono text-xs h-40 resize-y`}
+            value={historyText}
+            onChange={(e) => setHistoryText(e.target.value)}
+            placeholder={'12/31/2024 $13,717.09\n12/31/2025 $21,346.41'}
+            aria-label="Account balance history"
+          />
+          {historyText.trim() && (
+            parsedHistory.points.length > 0 ? (
+              <ul className="text-sm text-gray-700 grid grid-cols-1 sm:grid-cols-2 gap-x-6 max-h-48 overflow-y-auto">
+                {parsedHistory.points.map((p) => (
+                  <li key={p.date} className="flex justify-between gap-3 py-0.5">
+                    <span>{dateLabel(p.date)}</span>
+                    <span className="tabular-nums">{money(p.netWorth)}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-amber-800">No dates with balances found yet.</p>
+            )
+          )}
+          <div className="flex gap-2 justify-end">
+            <button type="button" className={secondaryButtonClass} onClick={closePanel}>Cancel</button>
+            <button type="submit" className={primaryButtonClass} disabled={isSaving || parsedHistory.points.length === 0}>
+              {isSaving ? 'Saving…' : `Save ${parsedHistory.points.length || ''} balance${parsedHistory.points.length === 1 ? '' : 's'}`}
+            </button>
           </div>
         </form>
       )}
@@ -164,44 +242,45 @@ export default function AccountBalancesSection() {
       {isLoading && data.snapshots.length === 0 ? (
         <Loading />
       ) : data.snapshots.length === 0 ? (
-        <Empty>No balances yet. Add an account's balance on a recent date to track it month by month.</Empty>
+        <Empty>No accounts yet. Paste an account's balance history, or add its balance on a recent date.</Empty>
       ) : (
         <>
-          {latest && (
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              <Kpi label="Tracked total" value={moneyWhole(latest.netWorth)} hint={`as of ${latest.date}`} />
-              <Kpi
-                label={data.series.length > 12 ? 'Change over 12 months' : 'Change since start'}
-                value={change === null ? '—' : `${change >= 0 ? '+' : '−'}${moneyWhole(Math.abs(change))}`}
-                tone={change === null ? 'neutral' : change >= 0 ? 'good' : 'bad'}
-              />
-            </div>
-          )}
-          {chartData.length > 1 && (
-            <div className="h-56 sm:h-64 -ml-2 mb-4">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E7EB" />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6B7280' }} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={8} />
-                  <YAxis tickFormatter={(v) => moneyWhole(v)} tick={{ fontSize: 11, fill: '#6B7280' }} tickLine={false} axisLine={false} width={72} />
-                  <Tooltip formatter={(value) => [money(Number(value)), 'Net worth']} labelFormatter={(_, payload) => payload?.[0]?.payload?.date ?? ''} />
-                  <Line type="monotone" dataKey="netWorth" name="Net worth" stroke={NET_WORTH_COLOR} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+          <ul className="divide-y divide-gray-100 mb-4">
+            {data.outside.map((item) => {
+              const last = item.balances[item.balances.length - 1];
+              return (
+                <li key={item.account} className="py-2 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 truncate">{item.account}</p>
+                    <p className="text-xs text-gray-500">
+                      {money(last.balance)} on {dateLabel(last.date)} · {item.balances.length} balance{item.balances.length === 1 ? '' : 's'} since {dateLabel(item.balances[0].date)}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input type="checkbox" checked={item.include} onChange={() => toggleInclude(item)} className="h-4 w-4" />
+                      Add to net worth
+                    </label>
+                    <button type="button" className={iconButtonClass} onClick={() => openPanel('history', undefined, item.account)} aria-label={`Paste history for ${item.account}`}>
+                      <ListPlus className="h-4 w-4" />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
 
-          <h3 className="text-sm font-semibold text-gray-700 mb-1">Balance snapshots</h3>
+          <h3 className="text-sm font-semibold text-gray-700 mb-1">Balances</h3>
           <ul className="divide-y divide-gray-100">
             {visibleSnapshots.map((s) => (
               <li key={s.id} className="py-2 flex items-center justify-between gap-2">
                 <div className="min-w-0">
                   <p className="font-medium text-gray-900 truncate">{s.account}</p>
-                  <p className="text-xs text-gray-500">{s.date}</p>
+                  <p className="text-xs text-gray-500">{dateLabel(s.date)}</p>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   <span className={`tabular-nums text-sm font-medium mr-1 ${s.balance < 0 ? 'text-red-700' : 'text-gray-900'}`}>{money(s.balance)}</span>
-                  <button type="button" className={iconButtonClass} onClick={() => openForm(s)} aria-label={`Edit ${s.account} balance from ${s.date}`}>
+                  <button type="button" className={iconButtonClass} onClick={() => openPanel('balance', s)} aria-label={`Edit ${s.account} balance from ${s.date}`}>
                     <Pencil className="h-4 w-4" />
                   </button>
                   <button type="button" className={dangerIconButtonClass} onClick={() => handleDelete(s)} aria-label={`Delete ${s.account} balance from ${s.date}`}>
