@@ -223,7 +223,25 @@ export function parseNetWorthHistory(text) {
   const skipped = [];
   let pendingDate = null;
 
-  for (const line of lines) {
+  // Statements with a column per year ("2025 2024 2023") and an "Ending Balance" row give
+  // year-end balances.
+  let years = null;
+  const yearEndLines = new Set();
+  lines.forEach((line, index) => {
+    if (/^(\d{4})(\s+\d{4})*$/.test(line)) {
+      years = line.split(/\s+/);
+      return;
+    }
+    if (!years || !/^Ending Balance\b/i.test(line)) return;
+    const amounts = line.match(new RegExp(MONEY, 'g')) ?? [];
+    if (amounts.length !== years.length) return;
+    years.forEach((year, i) => byDate.set(`${year}-12-31`, round2(moneyValue(amounts[i]))));
+    yearEndLines.add(index);
+    years = null;
+  });
+
+  for (const [index, line] of lines.entries()) {
+    if (yearEndLines.has(index) || /^(\d{4})(\s+\d{4})*$/.test(line)) continue;
     const date = findDate(line);
     if (date) {
       const value = findValue(date.rest);
@@ -236,7 +254,8 @@ export function parseNetWorthHistory(text) {
       }
       continue;
     }
-    const value = findValue(line);
+    // Only a line that is just an amount belongs to the date above it.
+    const value = /^\(?[-−]?\s?\$?\s?\d[\d,]*(\.\d+)?\)?(\s?[kKmM])?$/.test(line) ? findValue(line) : null;
     if (pendingDate && value !== null) {
       byDate.set(pendingDate.iso, round2(value));
       pendingDate = null;

@@ -116,3 +116,87 @@ export function pointBefore(history, daysBack) {
   const found = earlier.length ? earlier[earlier.length - 1] : history[0];
   return found === latest ? null : found;
 }
+
+// ── Accounts outside Fidelity ────────────────────────────────────────────────
+// Balances entered under "Accounts outside Fidelity" (the account_balances table) are added
+// on top of every recorded total, so an account Fidelity never sees still counts, back
+// through its history.
+
+/** Each account with dated balances, oldest first, and whether it adds to net worth. */
+export async function getOutsideAccounts(db) {
+  await bootstrapSchema(db);
+  const rows = await queryRows(db, `
+    SELECT b.account, b.date, b.balance, COALESCE(s.add_to_net_worth, 1) AS include
+    FROM account_balances b LEFT JOIN account_settings s ON s.account = b.account
+    ORDER BY b.account, b.date;
+  `);
+  const byAccount = new Map();
+  for (const row of rows) {
+    if (!byAccount.has(row.account)) {
+      byAccount.set(row.account, { account: row.account, include: Number(row.include) === 1, balances: [] });
+    }
+    byAccount.get(row.account).balances.push({ date: row.date, balance: toNumber(row.balance) });
+  }
+  return [...byAccount.values()];
+}
+
+export async function setAccountAddsToNetWorth(db, account, include) {
+  await bootstrapSchema(db);
+  await db.exec(
+    'INSERT INTO account_settings (account, add_to_net_worth) VALUES (?, ?) ON CONFLICT(account) DO UPDATE SET add_to_net_worth = excluded.add_to_net_worth;',
+    binds(account, include ? 1 : 0),
+  );
+  await saveDbToBrowser(db);
+}
+
+/** Saves many dated balances for one account, replacing any on the same dates. */
+export async function importAccountBalances(db, account, points) {
+  await bootstrapSchema(db);
+  const name = String(account ?? '').trim();
+  if (!name) throw new Error('Enter the account name.');
+  let saved = 0;
+  await inTransaction(db, async () => {
+    for (const { date, netWorth } of points) {
+      if (!ISO_DATE.test(date || '') || !Number.isFinite(netWorth)) continue;
+      await db.exec(
+        'INSERT INTO account_balances (account, date, balance) VALUES (?, ?, ?) ON CONFLICT(account, date) DO UPDATE SET balance = excluded.balance;',
+        binds(name, date, round2(netWorth)),
+      );
+      saved += 1;
+    }
+  });
+  await saveDbToBrowser(db);
+  return saved;
+}
+
+const daysBetween = (from, to) => (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
+
+/**
+ * An account's balance on `date`: straight-line between the balances around it, the last
+ * balance after them, and nothing before the first (the account didn't count yet).
+ */
+export function balanceOn(balances, date) {
+  if (balances.length === 0 || date < balances[0].date) return null;
+  const nextIndex = balances.findIndex((b) => b.date > date);
+  if (nextIndex === -1) return balances[balances.length - 1].balance;
+  const before = balances[nextIndex - 1];
+  const after = balances[nextIndex];
+  const share = daysBetween(before.date, date) / daysBetween(before.date, after.date);
+  return round2(before.balance + (after.balance - before.balance) * share);
+}
+
+/** Recorded totals with the included outside accounts added on each date. */
+export function addOutsideAccounts(history, accounts) {
+  const included = accounts.filter((a) => a.include);
+  return history.map((point) => {
+    const outsideByAccount = {};
+    let outside = 0;
+    for (const { account, balances } of included) {
+      const value = balanceOn(balances, point.date);
+      if (value === null) continue;
+      outsideByAccount[account] = value;
+      outside += value;
+    }
+    return { ...point, recorded: point.netWorth, outside: round2(outside), outsideByAccount, netWorth: round2(point.netWorth + outside) };
+  });
+}

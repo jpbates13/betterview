@@ -3,7 +3,8 @@ import type { FormEvent } from 'react';
 import { ClipboardPaste, LineChart as LineChartIcon, ListPlus, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import {
-  deleteNetWorthPoint, getNetWorthHistory, importNetWorthPoints, pointBefore, saveNetWorthSnapshot, setNetWorthPoint,
+  addOutsideAccounts, deleteNetWorthPoint, getNetWorthHistory, getOutsideAccounts, importNetWorthPoints, pointBefore,
+  saveNetWorthSnapshot, setNetWorthPoint,
 } from '../../db/netWorth.js';
 import { parseFidelityNetWorth, parseNetWorthHistory } from '../../db/netWorthParser.js';
 import { Empty, ErrorNote, Kpi, Loading, Section, SuccessNote } from '../planning/ui';
@@ -20,7 +21,7 @@ import {
   useDbData,
   useMutation,
 } from '../planning/shared';
-import type { DbApi, NetWorthHistoryPoint, ParsedNetWorth } from '../../types';
+import type { DbApi, NetWorthHistoryPoint, NetWorthWithOutside, ParsedNetWorth } from '../../types';
 import AccountBreakdown from './AccountBreakdown';
 
 const NET_WORTH_COLOR = '#2563EB';
@@ -90,8 +91,12 @@ function ChangeKpi({ history, days, label }: { history: NetWorthHistoryPoint[]; 
 
 export default function NetWorthHistorySection() {
   const today = todayIso();
-  const load = useCallback((db: DbApi) => getNetWorthHistory(db), []);
-  const { data: history, isLoading, error: loadError } = useDbData(load, [] as NetWorthHistoryPoint[]);
+  // Every total below includes the accounts outside Fidelity; `recorded` is the figure as saved.
+  const load = useCallback(
+    async (db: DbApi) => addOutsideAccounts(await getNetWorthHistory(db), await getOutsideAccounts(db)),
+    [],
+  );
+  const { data: history, isLoading, error: loadError } = useDbData(load, [] as NetWorthWithOutside[]);
   const mutate = useMutation();
 
   const [panel, setPanel] = useState<Panel>(null);
@@ -114,7 +119,7 @@ export default function NetWorthHistorySection() {
   const parsedHistory = useMemo(() => parseNetWorthHistory(historyText), [historyText]);
 
   // Single figure
-  const [editing, setEditing] = useState<NetWorthHistoryPoint | null>(null);
+  const [editing, setEditing] = useState<NetWorthWithOutside | null>(null);
   const [figureDate, setFigureDate] = useState(today);
   const [figure, setFigure] = useState('');
 
@@ -129,11 +134,11 @@ export default function NetWorthHistorySection() {
     if (next === 'history') setHistoryText('');
   };
 
-  const openFigure = (point?: NetWorthHistoryPoint) => {
+  const openFigure = (point?: NetWorthWithOutside) => {
     openPanel('figure');
     setEditing(point ?? null);
     setFigureDate(point?.date ?? today);
-    setFigure(point ? String(point.netWorth) : '');
+    setFigure(point ? String(point.recorded) : '');
   };
 
   const run = async (change: (db: DbApi) => Promise<string>, failure: string) => {
@@ -286,7 +291,7 @@ export default function NetWorthHistorySection() {
                 <AccountBreakdown categories={parsed.categories} accounts={parsed.accounts} />
                 {replacesDate && (
                   <p className="text-sm text-gray-600">
-                    This replaces the {replacesDate.source === 'fidelity' ? 'snapshot' : 'figure'} already saved for {dateLabel(effectiveSnapshotDate)} ({money(replacesDate.netWorth)}).
+                    This replaces the {replacesDate.source === 'fidelity' ? 'snapshot' : 'figure'} already saved for {dateLabel(effectiveSnapshotDate)} ({money(replacesDate.recorded)}).
                   </p>
                 )}
                 <div className="flex gap-2 justify-end">
@@ -385,7 +390,11 @@ export default function NetWorthHistorySection() {
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-              <Kpi label="Net worth" value={moneyWhole(latest.netWorth)} hint={`as of ${dateLabel(latest.date)}`} />
+              <Kpi
+                label="Net worth"
+                value={moneyWhole(latest.netWorth)}
+                hint={`as of ${dateLabel(latest.date)}${latest.outside ? `, incl. ${moneyWhole(latest.outside)} outside Fidelity` : ''}`}
+              />
               <ChangeKpi history={history} days={90} label="Last 90 days" />
               <ChangeKpi history={history} days={365} label="Last 12 months" />
             </div>
@@ -431,9 +440,12 @@ export default function NetWorthHistorySection() {
                           domain={['auto', 'auto']}
                         />
                         <Tooltip
-                          formatter={(value) => [money(Number(value)), 'Net worth']}
+                          formatter={(value, _name, item) => {
+                            const outside = (item?.payload as NetWorthWithOutside | undefined)?.outside ?? 0;
+                            return [`${money(Number(value))}${outside ? ` (incl. ${money(outside)} outside Fidelity)` : ''}`, 'Net worth'];
+                          }}
                           labelFormatter={(label, payload) => {
-                            const point = payload?.[0]?.payload as NetWorthHistoryPoint | undefined;
+                            const point = payload?.[0]?.payload as NetWorthWithOutside | undefined;
                             return `${dateLabel(point?.date ?? isoOf(Number(label)))}${point?.source === 'fidelity' ? ' · Fidelity snapshot' : ''}`;
                           }}
                         />
@@ -469,7 +481,12 @@ export default function NetWorthHistorySection() {
                     </p>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    <span className={`tabular-nums text-sm font-medium mr-1 ${point.netWorth < 0 ? 'text-red-700' : 'text-gray-900'}`}>{money(point.netWorth)}</span>
+                    <div className="text-right mr-1">
+                      <p className={`tabular-nums text-sm font-medium ${point.recorded < 0 ? 'text-red-700' : 'text-gray-900'}`}>{money(point.recorded)}</p>
+                      {point.outside !== 0 && (
+                        <p className="tabular-nums text-xs text-gray-500">{point.outside > 0 ? '+' : '−'}{money(Math.abs(point.outside))} outside Fidelity</p>
+                      )}
+                    </div>
                     {point.source === 'manual' && (
                       <button type="button" className={iconButtonClass} onClick={() => openFigure(point)} aria-label={`Edit the figure from ${point.date}`}>
                         <Pencil className="h-4 w-4" />
@@ -503,6 +520,22 @@ export default function NetWorthHistorySection() {
             assets={latestSnapshot.assets}
             liabilities={latestSnapshot.liabilities}
           />
+          {Object.keys(latestSnapshot.outsideByAccount).length > 0 && (
+            <div className="mt-4 min-w-0">
+              <div className="flex items-baseline justify-between border-b border-gray-200 pb-1 mb-1">
+                <h4 className="text-sm font-semibold text-gray-900">Outside Fidelity</h4>
+                <span className="tabular-nums text-sm font-semibold text-gray-900">{money(latestSnapshot.outside)}</span>
+              </div>
+              <ul className="divide-y divide-gray-100">
+                {Object.entries(latestSnapshot.outsideByAccount).map(([name, value]) => (
+                  <li key={name} className="py-1.5 flex items-start justify-between gap-3">
+                    <p className="text-sm text-gray-900 truncate">{name}</p>
+                    <p className={`tabular-nums text-sm ${value < 0 ? 'text-red-700' : 'text-gray-900'}`}>{money(value)}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </Section>
       )}
     </>

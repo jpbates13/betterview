@@ -1,0 +1,70 @@
+Close Window	Print Statement
+ 
+Acme Retirement Benefit Plan Account Statement
+
+JANE Q SAMPLE	Data as of September 30, 2026
+1 EXAMPLE STREET
+UNIT #2
+SPRINGFIELD, MA 01101
+
+
+Account Balance
+ 
+Plan	Balance	As of
+
+Acme Retirement Benefit Plan	$12,500.00	09/30/2026
+
+
+Account Balance - Account Details as of 09/30/2026
+ 
+ 	 	Current Year
+1/26 - 9/26	From Participation/Conv. date
+7/22 - 9/26
+
+
+Beginning Balance	 	$12,000.00	$0.00
+
+Total Adjustments	 	$500.00	$12,500.00
+      • Interest	 	$500.00	$1,000.00
+      • Contributions	 	$0.00	$11,500.00
+
+Ending Balance	 	$12,500.00	$12,500.00
+
+
+Account Balance - Prior Years' Activity
+ 
+ 	2025	2024	2023
+
+
+Beginning Balance	$8,000.00	$4,000.00	$1,000.00
+
+Total Adjustments	$4,000.00	$4,000.00	$3,000.00
+      • Interest	$300.00	$200.00	$100.00
+      • Contributions	$3,700.00	$3,800.00	$2,900.00
+
+Ending Balance	$12,000.00	$8,000.00	$4,000.00
+
+
+Account Balance - Prior Years' Activity (contd.)
+ 
+ 	2022	 	 
+
+
+Beginning Balance	$0.00	 	 
+
+Total Adjustments	$1,000.00	 	 
+      • Interest	$5.00	 	 
+      • Contributions	$995.00	 	 
+
+Ending Balance	$1,000.00	 	 
+
+
+View Rates
+ 
+ 	2026	2025	2024
+
+
+• Interest-Cash Balance Benefit	0.00%	0.00%	0.00%
+
+NetBenefits provided by Fidelity Investments	© 1996-2026 FMR LLC.
+All rights reserved.
