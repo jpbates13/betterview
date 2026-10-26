@@ -137,3 +137,58 @@ describe('previewRule', () => {
     expect(await q.executeRuleOnDatabase(db, saved)).toBe(preview.length);
   });
 });
+
+describe('date conditions', () => {
+  const mortgageRule = (operator, date, saving) => ({
+    name: `mortgage ${operator} ${date}`,
+    match_payload: JSON.stringify({
+      match_type: 'all',
+      conditions: [
+        { column: 'description', operator: 'contains', value: 'cmg' },
+        { column: 'date', operator, value: date },
+      ],
+    }),
+    action_type: 'split',
+    action_payload: { splits: [{ category: 'Saving', type: 'fixed', value: saving }, { category: 'Home', type: 'remainder' }] },
+  });
+
+  it('pick the split amount by date on import, including the boundary day', async () => {
+    const db = await freshDb();
+    await q.createRule(db, mortgageRule('before', '2026-08-24', -585));
+    await q.createRule(db, mortgageRule('on_or_after', '2026-08-24', -597.46));
+    await importCsvToDatabase(csvFile(
+      `${header}2026-07-24,CMG FINANCIAL,-2432.21,Chk,Mortgage\n2026-08-24,CMG FINANCIAL,-2432.21,Chk,Mortgage\n2026-09-24,CMG MORTGAGE,-2432.21,Chk,Mortgage\n`,
+    ), db);
+    expect(visibleRows(db)).toEqual([
+      ['CMG FINANCIAL', -585, 'Saving'],
+      ['CMG FINANCIAL', -1847.21, 'Home'],
+      ['CMG FINANCIAL', -597.46, 'Saving'],
+      ['CMG FINANCIAL', -1834.75, 'Home'],
+      ['CMG MORTGAGE', -597.46, 'Saving'],
+      ['CMG MORTGAGE', -1834.75, 'Home'],
+    ]);
+  });
+
+  it('limit a sweep of existing rows to the date range', async () => {
+    const db = await freshDb();
+    await q.createTransaction(db, { date: '2026-08-23', description: 'CMG FINANCIAL', amount: -2432.21, account: 'C', category: 'Mortgage' });
+    await q.createTransaction(db, { date: '2026-08-24', description: 'CMG FINANCIAL', amount: -2432.21, account: 'C', category: 'Mortgage' });
+    await q.createRule(db, mortgageRule('on_or_after', '2026-08-24', -597.46));
+    const [saved] = await q.getRules(db);
+    expect((await q.previewRule(db, saved)).map((row) => row.date)).toEqual(['2026-08-24']);
+    await q.executeRuleOnDatabase(db, saved);
+    expect(visibleRows(db)).toEqual([
+      ['CMG FINANCIAL', -2432.21, 'Mortgage'],
+      ['CMG FINANCIAL', -597.46, 'Saving'],
+      ['CMG FINANCIAL', -1834.75, 'Home'],
+    ]);
+  });
+
+  it('never match a row or value that is not a date', async () => {
+    const db = await freshDb();
+    await q.createTransaction(db, { date: '2026-08-24', description: 'CMG FINANCIAL', amount: -100, account: 'C', category: 'Mortgage' });
+    await q.createRule(db, mortgageRule('on_or_after', 'August', -50));
+    const [saved] = await q.getRules(db);
+    expect(await q.previewRule(db, saved)).toEqual([]);
+  });
+});

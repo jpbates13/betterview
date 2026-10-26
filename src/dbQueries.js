@@ -361,11 +361,22 @@ const conditionFieldValue = (transaction, column) => {
   return normalizeText(transaction?.merchant) || resolveMerchant(transaction?.description);
 };
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
 const evaluateCondition = (transaction, condition) => {
   const column = normalizeLower(condition?.column);
   if (!column) return false;
 
   const operator = normalizeRuleMatchOperator(condition?.operator);
+
+  // Date operators compare ISO YYYY-MM-DD strings, so "on or after 2026-08-24"
+  // includes the 24th itself.
+  if (operator === 'on_or_after' || operator === 'before') {
+    const txDate = String(conditionFieldValue(transaction, column) ?? '').slice(0, 10);
+    const condDate = normalizeText(condition?.value).slice(0, 10);
+    if (!ISO_DATE.test(txDate) || !ISO_DATE.test(condDate)) return false;
+    return operator === 'on_or_after' ? txDate >= condDate : txDate < condDate;
+  }
 
   // Numeric operators
   if (operator === 'greater_than' || operator === 'less_than') {
