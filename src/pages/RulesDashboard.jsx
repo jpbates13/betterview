@@ -24,6 +24,7 @@ const MATCH_COLUMNS = [
   { label: 'Account', value: 'account' },
   { label: 'Source File', value: 'source_file' },
   { label: 'Amount', value: 'amount' },
+  { label: 'Date', value: 'date' },
 ];
 
 const MATCH_OPERATORS = [
@@ -33,6 +34,18 @@ const MATCH_OPERATORS = [
   { label: 'Greater Than', value: 'greater_than' },
   { label: 'Less Than', value: 'less_than' },
 ];
+
+const DATE_OPERATORS = [
+  { label: 'On or After', value: 'on_or_after' },
+  { label: 'Before', value: 'before' },
+  { label: 'On', value: 'equals' },
+];
+
+const operatorsFor = (column) => (column === 'date' ? DATE_OPERATORS : MATCH_OPERATORS);
+
+const OPERATOR_LABELS = Object.fromEntries(
+  [...MATCH_OPERATORS, ...DATE_OPERATORS].map((opt) => [opt.value, opt.label.toLowerCase()]),
+);
 
 const ACTION_TYPES = [
   { label: 'Categorize', value: 'categorize' },
@@ -117,7 +130,7 @@ const formatConditionSummary = (matchPayload) => {
   const { matchType, conditions } = safeParseConditions(matchPayload);
   const separator = matchType === 'any' ? ' OR ' : ' AND ';
   const label = matchType === 'any' ? 'Matches ANY of' : 'Matches ALL of';
-  const parts = conditions.map((c) => `${c.column} ${c.operator} "${c.value}"`);
+  const parts = conditions.map((c) => `${c.column} ${OPERATOR_LABELS[c.operator] || c.operator} "${c.value}"`);
   return `${label}: ${parts.join(separator)}`;
 };
 
@@ -365,7 +378,16 @@ export default function RulesDashboard() {
   // ── Condition list handlers ────────────────────────────────────────────────
 
   const handleConditionChange = (index, field, value) => {
-    setConditions((prev) => prev.map((c, i) => i !== index ? c : { ...c, [field]: value }));
+    setConditions((prev) => prev.map((c, i) => {
+      if (i !== index) return c;
+      const next = { ...c, [field]: value };
+      // Switching to or from Date swaps the operator list, so keep the operator valid.
+      if (field === 'column' && !operatorsFor(value).some((opt) => opt.value === next.operator)) {
+        next.operator = operatorsFor(value)[0].value;
+        if (value === 'date' || c.column === 'date') next.value = '';
+      }
+      return next;
+    }));
   };
 
   const addCondition = () => setConditions((prev) => [...prev, createCondition()]);
@@ -714,7 +736,7 @@ export default function RulesDashboard() {
                           onChange={(e) => handleConditionChange(index, 'operator', e.target.value)}
                           className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all bg-white"
                         >
-                          {MATCH_OPERATORS.map((opt) => (
+                          {operatorsFor(condition.column).map((opt) => (
                             <option key={opt.value} value={opt.value}>{opt.label}</option>
                           ))}
                         </select>
@@ -723,7 +745,7 @@ export default function RulesDashboard() {
                       <div className="md:col-span-4">
                         <label className="block text-xs font-medium text-gray-600 mb-1">Value</label>
                         <input
-                          type="text"
+                          type={condition.column === 'date' ? 'date' : 'text'}
                           value={condition.value}
                           onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
                           placeholder={condition.column === 'merchant' ? 'Blue Bottle Coffee' : condition.column === 'amount' ? '-100' : 'Amazon'}
