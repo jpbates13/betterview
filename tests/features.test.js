@@ -282,3 +282,73 @@ describe('picking a reimbursement link by hand', () => {
     expect(rows.map((row) => row.id)).toEqual([open]);
   });
 });
+
+describe('a linked reimbursement follows its expense category', () => {
+  const categoryOf = (db, id) => db.raw.exec('SELECT category FROM transactions WHERE id = ?', [id])[0].values[0][0];
+
+  it('takes the expense category when linked and keeps it when unlinked', async () => {
+    const db = await freshDb();
+    const { id: hotel } = await tx(db, '2026-09-30', 'COT HTL', -3532.71, 'Travel & vacation');
+    const { id: cashout } = await tx(db, '2026-10-05', 'DIRECT DEPOSIT VENMO CASHOUT', 2211.26, 'Cash & ATM');
+
+    expect(await f.linkReimbursement(db, cashout, hotel)).toBe('Travel & vacation');
+    expect(categoryOf(db, cashout)).toBe('Travel & vacation');
+
+    await f.linkReimbursement(db, cashout, null);
+    expect(categoryOf(db, cashout)).toBe('Travel & vacation');
+  });
+
+  it('moves with the expense when the expense is recategorized', async () => {
+    const db = await freshDb();
+    const { id: dinner } = await tx(db, '2026-05-01', 'DINNER', -80, 'Food');
+    const { id: payback } = await tx(db, '2026-05-02', 'VENMO FROM SAM', 40, 'Cash & ATM');
+    await f.linkReimbursement(db, payback, dinner);
+
+    await q.updateTransaction(db, dinner, { date: '2026-05-01', description: 'DINNER', amount: -80, account: 'Card', category: 'Dining out', manual_override: null });
+    expect(categoryOf(db, payback)).toBe('Dining out');
+  });
+
+  it('is skipped by categorize rule sweeps, which still carry the expense over', async () => {
+    const db = await freshDb();
+    const { id: dinner } = await tx(db, '2026-05-01', 'DINNER VENMO', -80, 'Food');
+    const { id: payback } = await tx(db, '2026-05-02', 'VENMO CASHOUT', 40, 'Cash & ATM');
+    await f.linkReimbursement(db, payback, dinner);
+
+    await q.createRule(db, {
+      name: 'venmo', priority: 0, action_type: 'categorize', action_payload: 'Cash & ATM', is_active: 1,
+      match_payload: JSON.stringify({ match_type: 'all', conditions: [{ column: 'description', operator: 'contains', value: 'cashout' }] }),
+    });
+    const [rule] = await q.getRules(db);
+    expect(await q.previewRule(db, rule)).toEqual([]);
+    expect(await q.executeRuleOnDatabase(db, rule)).toBe(0);
+    expect(categoryOf(db, payback)).toBe('Food');
+
+    await q.createRule(db, {
+      name: 'dinner', priority: 0, action_type: 'categorize', action_payload: 'Dining out', is_active: 1,
+      match_payload: JSON.stringify({ match_type: 'all', conditions: [{ column: 'description', operator: 'contains', value: 'dinner' }] }),
+    });
+    const dinnerRule = (await q.getRules(db)).find((r) => r.name === 'dinner');
+    await q.executeRuleOnDatabase(db, dinnerRule);
+    expect(categoryOf(db, payback)).toBe('Dining out');
+  });
+
+  it('backfills links made before this, once', async () => {
+    const db = makeDb();
+    await q.bootstrapSchema(db);
+    const { id: hotel } = await tx(db, '2026-09-30', 'COT HTL', -500, 'Travel & vacation');
+    const { id: cashout } = await tx(db, '2026-10-05', 'VENMO CASHOUT', 200, 'Cash & ATM');
+    // An old link, made before linking set the category.
+    db.raw.run('UPDATE transactions SET reimburses_id = ? WHERE id = ?', [hotel, cashout]);
+    db.raw.run("DELETE FROM app_settings WHERE key = 'migration_linked_reimbursement_category'");
+
+    const reopened = makeDb(db.raw.export());
+    await q.bootstrapSchema(reopened);
+    expect(categoryOf(reopened, cashout)).toBe('Travel & vacation');
+
+    // A later hand edit sticks across reopens.
+    reopened.raw.run("UPDATE transactions SET category = 'Gifts' WHERE id = ?", [cashout]);
+    const again = makeDb(reopened.raw.export());
+    await q.bootstrapSchema(again);
+    expect(categoryOf(again, cashout)).toBe('Gifts');
+  });
+});
