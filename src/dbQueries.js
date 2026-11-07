@@ -833,6 +833,14 @@ async function runBootstrap(db) {
   }
 
   await ensureSupportTables(db);
+
+  // Once: credits linked before links carried the category over take their expense's.
+  const [backfilled] = await queryRows(db, 'SELECT value FROM app_settings WHERE key = ?;', binds(LINKED_CATEGORY_BACKFILL_KEY));
+  if (!backfilled) {
+    await syncLinkedReimbursementCategories(db);
+    await db.exec('INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?);', binds(LINKED_CATEGORY_BACKFILL_KEY, '1'));
+  }
+
   // Rows from before merchant names existed get one computed once.
   await refreshMerchants(db, { onlyMissing: true });
   bootstrappedDbs.add(db);
@@ -939,6 +947,25 @@ const assertNotSplitChild = async (db, transactionId) => {
   }
 };
 
+// A reimbursement linked to an expense takes the expense's category, so the credit
+// reads the same on the Transactions page as it counts in analytics. With expenseIds,
+// only credits linked to those expenses; otherwise every linked credit.
+export async function syncLinkedReimbursementCategories(db, expenseIds = null) {
+  if (Array.isArray(expenseIds) && expenseIds.length === 0) return;
+  const scope = Array.isArray(expenseIds) ? `reimburses_id IN (${placeholders(expenseIds.length)})` : 'reimburses_id IS NOT NULL';
+  await db.exec(
+    `UPDATE transactions
+     SET category = (SELECT e.category FROM transactions e WHERE e.id = transactions.reimburses_id),
+         applied_rule_id = NULL
+     WHERE ${scope}
+       AND EXISTS (SELECT 1 FROM transactions e WHERE e.id = transactions.reimburses_id AND e.category IS NOT NULL)
+       AND category IS NOT (SELECT e.category FROM transactions e WHERE e.id = transactions.reimburses_id);`,
+    Array.isArray(expenseIds) ? binds(...expenseIds) : undefined,
+  );
+}
+
+const LINKED_CATEGORY_BACKFILL_KEY = 'migration_linked_reimbursement_category';
+
 export async function updateTransaction(db, transactionId, tx) {
   await assertNotSplitChild(db, transactionId);
 
@@ -969,6 +996,7 @@ export async function updateTransaction(db, transactionId, tx) {
       transactionId,
     ),
   );
+  if (amount < 0) await syncLinkedReimbursementCategories(db, [Number(transactionId)]);
 
   await saveDbToBrowser(db);
   return { status: 'success', id: Number(transactionId) };
@@ -1172,7 +1200,10 @@ const findRuleMatches = async (db, rule) => {
   const rows = await queryRows(db, 'SELECT * FROM transactions WHERE is_hidden = 0 ORDER BY id ASC;');
   const matched = rows.filter((row) => ruleMatchesTransaction(row, rule));
   if (normalizeRuleActionType(rule.action_type) !== 'split') {
-    return matched.map((row) => ({ row }));
+    // A linked reimbursement follows its expense's category, not rules.
+    return matched
+      .filter((row) => row.reimburses_id === null || row.reimburses_id === undefined)
+      .map((row) => ({ row }));
   }
   return matched
     .filter((row) => row.split_parent_id === null || row.split_parent_id === undefined)
@@ -1229,6 +1260,7 @@ export async function executeRuleOnDatabase(db, rule) {
         binds(targetCategory, ruleId, ...ids),
       );
       affected = await changes(db);
+      await syncLinkedReimbursementCategories(db, ids);
     } else if (actionType === 'split') {
       for (const { row: parentRow, splits } of matches) {
         const dedupe = dedupeInfoFor(parentRow);

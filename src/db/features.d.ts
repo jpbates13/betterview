@@ -26,7 +26,7 @@ export function bulkSetOverride(db: DbApi, transactionIds: number[], overrideSta
 export function bulkDelete(db: DbApi, transactionIds: number[]): Promise<number>;
 
 export const REIMBURSABLE_TAG: 'reimbursable';
-export function linkReimbursement(db: DbApi, reimbursementId: number, expenseId: number | null): Promise<void>;
+export function linkReimbursement(db: DbApi, reimbursementId: number, expenseId: number | null): Promise<string | null>;
 export function getReimbursementStatus(db: DbApi): Promise<ReimbursementStatus[]>;
 export function getLinkedReimbursements(db: DbApi, expenseId: number): Promise<CreditRow[]>;
 export interface LinkCandidate {

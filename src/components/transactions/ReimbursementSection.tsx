@@ -12,6 +12,8 @@ import type { CreditRow, Transaction } from '../../types';
 
 interface ReimbursementSectionProps {
   transaction: Transaction;
+  /** Called with the credit's new category after linking it to an expense. */
+  onCategoryChange?: (category: string) => void;
 }
 
 const money = (n: number) => `$${Math.abs(n).toFixed(2)}`;
@@ -29,7 +31,7 @@ const toCredit = (row: CreditRow): CreditRow => ({
  * Reimbursement links for one transaction: for an expense, the credits that pay
  * it back and what's still owed; for a credit, the expense it pays back.
  */
-export default function ReimbursementSection({ transaction }: ReimbursementSectionProps) {
+export default function ReimbursementSection({ transaction, onCategoryChange }: ReimbursementSectionProps) {
   const { db, notifyDataChanged, triggerMutation } = useDatabase();
   const isExpense = transaction.amount < 0;
 
@@ -83,7 +85,8 @@ export default function ReimbursementSection({ transaction }: ReimbursementSecti
     setBusy(true);
     setError(null);
     try {
-      await linkReimbursement(db, creditId, expenseId);
+      const category = await linkReimbursement(db, creditId, expenseId);
+      if (!isExpense && expenseId !== null && category) onCategoryChange?.(category);
       notifyDataChanged();
       triggerMutation();
       if (!isExpense) setReimbursesId(expenseId);

@@ -1,6 +1,8 @@
 // Budgets, tags, reimbursements, recurring charges, net worth and yearly summaries.
 import { saveDbToBrowser } from '../dbStorage.js';
-import { bootstrapSchema, getAnalyticsInclusionSql, getAnalyticsSql, getCategoryNetSpending } from '../dbQueries.js';
+import {
+  bootstrapSchema, getAnalyticsInclusionSql, getAnalyticsSql, getCategoryNetSpending, syncLinkedReimbursementCategories,
+} from '../dbQueries.js';
 import { binds, changes, inTransaction, normalizeText, placeholders, queryRows, round2, toNumber } from './sql.js';
 
 const monthBounds = (month) => {
@@ -120,16 +122,23 @@ export async function bulkDelete(db, transactionIds) {
 export const REIMBURSABLE_TAG = 'reimbursable';
 
 // Links a refund/reimbursement (positive row) to the expense it pays back, or unlinks it.
+// Linking moves the credit into the expense's category; unlinking leaves the category as
+// it is. Returns the credit's category afterwards.
 export async function linkReimbursement(db, reimbursementId, expenseId) {
-  const [reimbursement] = await queryRows(db, 'SELECT id, amount FROM transactions WHERE id = ?;', binds(reimbursementId));
+  const [reimbursement] = await queryRows(db, 'SELECT id, amount, category FROM transactions WHERE id = ?;', binds(reimbursementId));
   if (!reimbursement) throw new Error('Reimbursement not found.');
   if (expenseId !== null) {
     if (toNumber(reimbursement.amount) <= 0) throw new Error('Only incoming money can be linked as a reimbursement.');
     const [expense] = await queryRows(db, 'SELECT id, amount FROM transactions WHERE id = ?;', binds(expenseId));
     if (!expense || toNumber(expense.amount) >= 0) throw new Error('Pick an expense to link this reimbursement to.');
   }
-  await db.exec('UPDATE transactions SET reimburses_id = ? WHERE id = ?;', binds(expenseId, reimbursementId));
+  await inTransaction(db, async () => {
+    await db.exec('UPDATE transactions SET reimburses_id = ? WHERE id = ?;', binds(expenseId, reimbursementId));
+    if (expenseId !== null) await syncLinkedReimbursementCategories(db, [expenseId]);
+  });
   await saveDbToBrowser(db);
+  const [after] = await queryRows(db, 'SELECT category FROM transactions WHERE id = ?;', binds(reimbursementId));
+  return after?.category ?? reimbursement.category ?? null;
 }
 
 // Expenses tagged "reimbursable", with how much has been paid back so far.

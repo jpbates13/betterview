@@ -267,7 +267,12 @@ function TransactionForm({ onClose, mode, initialData, onSubmit, categories = []
             </div>
           </form>
 
-          {editing?.id && !editing.is_split && <ReimbursementSection transaction={editing as Transaction} />}
+          {editing?.id && !editing.is_split && (
+            <ReimbursementSection
+              transaction={editing as Transaction}
+              onCategoryChange={(category) => setFormData((prev) => ({ ...prev, category }))}
+            />
+          )}
         </div>
 
         <div className="px-4 sm:px-6 py-4 border-t border-gray-100 bg-gray-50 flex items-center justify-end gap-3">

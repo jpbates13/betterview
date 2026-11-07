@@ -27,6 +27,7 @@ export function bootstrapSchema(db: DbApi): Promise<void>;
 
 export function getTransactions(db: DbApi | null | undefined, options?: TransactionQuery): Promise<Transaction[]>;
 export function createTransaction(db: DbApi, tx: TransactionInput): Promise<MutationResult>;
+export function syncLinkedReimbursementCategories(db: DbApi, expenseIds?: number[] | null): Promise<void>;
 export function updateTransaction(db: DbApi, transactionId: number, tx: TransactionInput): Promise<MutationResult>;
 export function deleteTransaction(db: DbApi, transactionId: number): Promise<MutationResult>;
 export function overrideTransaction(
