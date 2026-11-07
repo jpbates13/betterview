@@ -23,6 +23,7 @@ import {
 } from '../planning/shared';
 import type { DbApi, NetWorthHistoryPoint, NetWorthWithOutside, ParsedNetWorth } from '../../types';
 import AccountBreakdown from './AccountBreakdown';
+import NetWorthExportMenu from './NetWorthExportMenu';
 
 const NET_WORTH_COLOR = '#2563EB';
 const RANGES = [
@@ -241,6 +242,7 @@ export default function NetWorthHistorySection() {
             <button type="button" className={secondaryButtonClass} onClick={() => openFigure()}>
               <Plus className="h-4 w-4" aria-hidden="true" /> Add figure
             </button>
+            {history.length > 0 && <NetWorthExportMenu history={history} />}
           </>
         )}
       >

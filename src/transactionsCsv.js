@@ -1,4 +1,4 @@
-import Papa from 'papaparse';
+import { dateStamp, toCsv } from './csv.js';
 
 // Builds the CSV for an export of transactions. The first five columns match the
 // built-in Fidelity layout (Date, Description, Amount, Account, Category), so an
@@ -26,27 +26,14 @@ export function transactionStatus(tx) {
   return 'Included';
 }
 
-// Spreadsheets run a cell that starts with = + - @ as a formula. Text from a bank
-// file shouldn't, so it gets a leading apostrophe; plain numbers are left alone.
-const FORMULA_START = /^[=+\-@\t\r]/;
-const PLAIN_NUMBER = /^[+-]?\d+(\.\d+)?$/;
-const safeText = (value) => {
-  const text = String(value ?? '');
-  return FORMULA_START.test(text) && !PLAIN_NUMBER.test(text) ? `'${text}` : text;
-};
-
 export function transactionsToCsv(transactions) {
-  const fields = COLUMNS.map(([name]) => name);
-  const data = transactions.map((tx) => COLUMNS.map(([, get]) => {
-    const value = get(tx);
-    return typeof value === 'number' ? value : safeText(value);
-  }));
-  // The byte order mark makes Excel read the file as UTF-8.
-  return `\uFEFF${Papa.unparse({ fields, data }, { newline: '\r\n' })}\r\n`;
+  return toCsv(
+    COLUMNS.map(([name]) => name),
+    transactions.map((tx) => COLUMNS.map(([, get]) => get(tx))),
+  );
 }
 
 export function exportFileName(scope, today = new Date()) {
-  const pad = (n) => String(n).padStart(2, '0');
-  const stamp = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const stamp = dateStamp(today);
   return scope === 'all' ? `betterview-transactions-${stamp}.csv` : `betterview-transactions-${scope}-${stamp}.csv`;
 }
