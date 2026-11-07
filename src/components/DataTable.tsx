@@ -1,6 +1,7 @@
 import { useState, useMemo, useDeferredValue } from 'react';
 import { ChevronLeft, ChevronRight, FileDigit, ArrowUpDown, ChevronUp, ChevronDown, Edit2, Search, Trash2, Scissors, FilterX, Undo2, Tag } from 'lucide-react';
 import type { Transaction } from '../types';
+import ExportMenu from './transactions/ExportMenu';
 
 export type { Transaction } from '../types';
 
@@ -58,6 +59,8 @@ interface DataTableProps {
   /** Shows row checkboxes; the bar is rendered above the table while rows are selected. */
   renderBulkBar?: (selected: Transaction[], clearSelection: () => void) => React.ReactNode;
   emptyMessage?: React.ReactNode;
+  /** Shows an Export CSV button for the filtered view, the selection, or every row. */
+  exportable?: boolean;
 }
 
 export default function DataTable({
@@ -73,6 +76,7 @@ export default function DataTable({
   extraHeaderAction,
   renderBulkBar,
   emptyMessage,
+  exportable,
 }: DataTableProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [sortField, setSortField] = useState<SortField>('date');
@@ -164,9 +168,21 @@ export default function DataTable({
     return [...filteredData].sort((a, b) => compareRows(a, b, sortField) * direction);
   }, [filteredData, sortField, sortDirection]);
 
+  // Exports keep the table's sort order; only computed for tables that can export.
+  const sortedAll = useMemo(() => {
+    if (!exportable) return [];
+    const direction = sortDirection === 'asc' ? 1 : -1;
+    return [...data].sort((a, b) => compareRows(a, b, sortField) * direction);
+  }, [exportable, data, sortField, sortDirection]);
+
   const selectedRows = useMemo(
     () => (selectedIds.size === 0 ? [] : data.filter((tx) => selectedIds.has(tx.id))),
     [data, selectedIds],
+  );
+
+  const sortedSelected = useMemo(
+    () => (!exportable || selectedIds.size === 0 ? [] : sortedAll.filter((tx) => selectedIds.has(tx.id))),
+    [exportable, sortedAll, selectedIds],
   );
 
   const hasActiveFilters =
@@ -411,7 +427,19 @@ export default function DataTable({
               </span>
             )}
           </div>
-          {extraHeaderAction && <div className="self-start">{extraHeaderAction}</div>}
+          {(exportable || extraHeaderAction) && (
+            <div className="self-start flex items-center gap-2">
+              {exportable && (
+                <ExportMenu
+                  all={sortedAll}
+                  filtered={sortedData}
+                  selected={sortedSelected}
+                  hasActiveFilters={hasActiveFilters}
+                />
+              )}
+              {extraHeaderAction}
+            </div>
+          )}
         </div>
 
         <div className="w-full bg-white border border-gray-200 rounded-lg p-3">

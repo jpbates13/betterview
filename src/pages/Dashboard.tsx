@@ -636,6 +636,7 @@ export default function Dashboard() {
           onUndoSplit={handleUndoSplit}
           onDelete={handleDeleteTransaction}
           renderBulkBar={renderBulkBar}
+          exportable
           emptyMessage={batchFilter ? 'Nothing from this import is left.' : undefined}
         />
       </div>
